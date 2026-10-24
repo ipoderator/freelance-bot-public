@@ -22,9 +22,13 @@ MIN_DIGEST_INTERVAL_MIN = 15  # чаще — уже не дайджест, а п
 DEFAULT_LLM_MODEL = "claude-sonnet-5-5"
 DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
-DEFAULT_INTERVALS: dict[str, int] = {"fl": 180, "kwork": 300, "work24": 600, "hh": 600}
+DEFAULT_INTERVALS: dict[str, int] = {
+    "fl": 180, "kwork": 300, "work24": 600, "freelance_ru": 600, "workzilla": 600, "hh": 600,
+}  # fmt: skip
 # Ленты Work24 — имена операций из freelance_bot/sources/work24.json
 WORK24_FEEDS = ("listItOrders", "listOrders")
+# Разделы Freelance.ru, задания которых бот читает (лента /task — общая для всех разделов)
+FREELANCE_RU_CATEGORIES = ("Веб-разработка и IT", "ИИ и Нейросети")
 # HH: чат бота hh.ru, который присылает уведомления автопоиска (freelance_bot/sources/hh.py)
 DEFAULT_HH_CHAT = "hh_rabota_bot"
 
@@ -60,6 +64,8 @@ class SourceSettings:
     operations: list[str] = field(default_factory=list)
     # Только HH: username бота hh.ru в Telegram, чьи уведомления читать — вместо urls
     chat: str = ""
+    # Только Freelance.ru: разделы заданий (пусто — все); остальные карточки не открываются
+    categories: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -99,6 +105,9 @@ class Settings:
     hh_tg_api_id: int | None = None
     hh_tg_api_hash: str | None = field(default=None, repr=False)
     hh_tg_session: str | None = field(default=None, repr=False)
+    # Work-zilla: сессия аккаунта исполнителя — Cookie и заголовок agentid (workzilla-session)
+    workzilla_cookie: str | None = field(default=None, repr=False)
+    workzilla_agent_id: str | None = field(default=None, repr=False)
 
     @property
     def has_llm_key(self) -> bool:
@@ -132,6 +141,8 @@ def load_settings(path: Path = Path("settings.toml"), env_file: Path = Path(".en
         hh_tg_api_id=_parse_api_id(env.get("HH_TG_API_ID")),
         hh_tg_api_hash=env.get("HH_TG_API_HASH"),
         hh_tg_session=env.get("HH_TG_SESSION"),
+        workzilla_cookie=env.get("WORKZILLA_COOKIE"),
+        workzilla_agent_id=env.get("WORKZILLA_AGENT_ID"),
         db_path=Path(_str(storage, "db_path", "storage.db_path", "data/bot.sqlite3")),
         timezone=_str(general, "timezone", "general.timezone", "Europe/Moscow"),
         max_age_hours=_number(general, "max_age_hours", "general.max_age_hours", 6),
@@ -180,7 +191,8 @@ def _read_env(env_file: Path) -> dict[str, str | None]:
     names = (
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "ANTHROPIC_API_KEY", "LLM_MODEL",
         "OPENAI_API_KEY", "OPENAI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
-        "HH_TG_API_ID", "HH_TG_API_HASH", "HH_TG_SESSION",
+        "HH_TG_API_ID", "HH_TG_API_HASH", "HH_TG_SESSION", "WORKZILLA_COOKIE",
+        "WORKZILLA_AGENT_ID",
     )  # fmt: skip
     result: dict[str, str | None] = {}
     for name in names:
@@ -231,6 +243,7 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
             sources[platform] = SourceSettings(
                 enabled=False, interval_sec=DEFAULT_INTERVALS[platform], urls=[],
                 chat=DEFAULT_HH_CHAT if platform == "hh" else "",
+                categories=list(FREELANCE_RU_CATEGORIES) if platform == "freelance_ru" else [],
             )  # fmt: skip
             continue
         table = _table(raw, platform, prefix)
@@ -254,6 +267,7 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
             )
         operations = _parse_operations(table, platform, prefix)
         chat = _parse_chat(table, platform, prefix)
+        categories = _parse_categories(table, platform, prefix)
         sources[platform] = SourceSettings(
             enabled=_bool(table, "enabled", f"{prefix}.enabled", True),
             interval_sec=max(interval, MIN_INTERVAL_SEC),
@@ -264,6 +278,7 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
             only_free_responses=only_free,
             operations=operations,
             chat=chat,
+            categories=categories,
         )
     return sources
 
@@ -281,6 +296,19 @@ def _parse_operations(table: dict[str, Any], platform: str, prefix: str) -> list
     ):
         raise ConfigError(f"{prefix}.operations: нужен список из {', '.join(WORK24_FEEDS)}")
     return list(dict.fromkeys(operations))
+
+
+def _parse_categories(table: dict[str, Any], platform: str, prefix: str) -> list[str]:
+    if platform != "freelance_ru":
+        if "categories" in table:
+            raise ConfigError(
+                f"{prefix}.categories: настройка действует только для sources.freelance_ru"
+            )
+        return []
+    categories = table.get("categories", list(FREELANCE_RU_CATEGORIES))
+    if not isinstance(categories, list) or not all(isinstance(c, str) and c for c in categories):
+        raise ConfigError(f"{prefix}.categories: нужен список названий разделов Freelance.ru")
+    return list(dict.fromkeys(categories))
 
 
 def _parse_chat(table: dict[str, Any], platform: str, prefix: str) -> str:

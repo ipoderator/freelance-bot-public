@@ -104,6 +104,42 @@ daily_auto_limit = 0
 # для нового открытого заказа моложе general.max_age_hours.
 operations = ["listItOrders"]
 
+[sources.freelance_ru]
+# Freelance.ru — готовые операции API Anything (freelance_bot/sources/freelance-ru.json,
+# docs/platforms.md, §5; ADR 0010): первая страница ленты freelance.ru/task (25 заданий всех
+# разделов, около двух суток) и публичная карточка задания с полным текстом. Без входа и
+# ключа. robots.txt закрывает адреса с ?page= — бот читает только /task. Задания «Только для
+# Премиум» пропускаются: их полный текст без премиум-доступа закрыт. Карточка открывается один
+# раз и только для нового публичного задания моложе general.max_age_hours (до 10 за цикл).
+# Правила площадки запрещают автоматическую рассылку откликов (п. 5.10, 9.7) — бот их не
+# отправляет. Контакты заказчика («Телеграм: @ник», t.me/…) из текста вырезаются. Включён по
+# просьбе пользователя 2026-10-24.
+enabled = true
+interval_sec = 600
+jitter_sec = 60
+mode = "draft"
+daily_auto_limit = 0
+# Лента /task общая для всех разделов, поэтому бот берёт только задания этих разделов (как
+# IT-рубрики RSS у FL); остальные карточки не открываются. [] — все разделы. Есть ещё:
+# «Бизнес, Продажи и Консалтинг», «Маркетинг и Продвижение», «Тексты и Переводы», «Дизайн и
+# Брендинг», «Фото и Контент», «Обучение и Наставничество» и др. (фильтр на freelance.ru/task).
+categories = ["Веб-разработка и IT", "ИИ и Нейросети"]
+
+[sources.workzilla]
+# Work-zilla — операции API Anything (freelance_bot/sources/work-zilla.json, docs/platforms.md,
+# §6; ADR 0010) с сессией вашего аккаунта исполнителя: WORKZILLA_COOKIE и WORKZILLA_AGENT_ID
+# в .env (`python -m freelance_bot workzilla-session --from …/sessions/work-zilla.json`).
+# Один запрос за цикл; задания разбираются, только если Work-zilla сообщает
+# isStaticOrders = false. Пока обязательные шаги в кабинете не пройдены, лента
+# демонстрационная (isStaticOrders = true, проверено 2026-10-24): бот ничего не сохраняет и
+# не присылает, в /status — «лента демонстрационная». Выключен, пока доступ не откроется:
+# настоящие задания вживую не проверялись. Отклики бот не отправляет.
+enabled = false
+interval_sec = 600
+jitter_sec = 60
+mode = "draft"
+daily_auto_limit = 0
+
 [sources.hh]
 # HH.ru — вакансии из уведомлений автопоиска, которые бот hh.ru (@hh_rabota_bot, «Хэдди»)
 # присылает вам в Telegram (ADR 0009, docs/platforms.md, §4). Сайт и API hh.ru бот не трогает:

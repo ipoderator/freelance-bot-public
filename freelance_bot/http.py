@@ -81,6 +81,14 @@ class TemporarySourceError(SourceError):
         self.retry_after = retry_after
 
 
+class HttpStatusError(SourceError):
+    """Площадка ответила 4xx (кроме 403 и 429): адрес или доступ не тот, повтор не поможет."""
+
+    def __init__(self, message: str, status: int) -> None:
+        super().__init__(message)
+        self.status = status
+
+
 class BlockedError(SourceError):
     """Площадка показала CAPTCHA/403/блок-страницу. Не обходим и не повторяем."""
 
@@ -187,7 +195,7 @@ class Fetcher:
                     problem = f"HTTP {status}"
                     retry_after = _parse_retry_after(response.headers.get("Retry-After"))
                 elif status >= 400:
-                    raise SourceError(f"{host}: HTTP {status} для {url}")
+                    raise HttpStatusError(f"{host}: HTTP {status} для {url}", status)
                 else:
                     return text
 

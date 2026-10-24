@@ -16,7 +16,8 @@ from freelance_bot.pricing import Estimate
 from freelance_bot.scoring import DIRECTION_LABELS
 
 PLATFORM_NAMES: dict[str, str] = {
-    "fl": "FL.ru", "kwork": "Kwork", "work24": "Work24", "hh": "HH.ru",
+    "fl": "FL.ru", "kwork": "Kwork", "work24": "Work24", "freelance_ru": "Freelance.ru",
+    "workzilla": "Work-zilla", "hh": "HH.ru",
 }  # fmt: skip
 KWORK_TERMS_URL = "https://kwork.ru/terms_of_service"
 KWORK_WARNING = (
@@ -57,6 +58,11 @@ PLATFORM_TIPS: dict[str, tuple[str, ...]] = {
     "work24": (
         "без контактов и ссылок: за передачу контактов Work24 штрафует на 500 ₽ (оферта, п. 1.3)",
         "общение и оплата — только через сайт",
+    ),
+    "freelance_ru": (
+        "без ссылок, мессенджеров и готовых работ в тексте: контакты — в профиле, работы — "
+        "в портфолио (правила Freelance.ru, п. 9.4–9.5)",
+        "однотипные отклики на разные задания площадка считает спамом (п. 9.7)",
     ),
 }
 # Вакансии HH: отклик пользователь делает на hh.ru сам — без черновика, цены и срока
@@ -292,7 +298,7 @@ def format_offer_list(
 
 def format_start(next_digest: str | None) -> str:
     lines = [
-        "👋 <b>Привет!</b> Я ищу заказы на FL.ru, Kwork и Work24 под ваш профиль "
+        "👋 <b>Привет!</b> Я ищу заказы на FL.ru, Kwork, Work24 и Freelance.ru под ваш профиль "
         "и готовлю отклики.",
         "",
         f"{MENU_NEW} — заказы, которых вы ещё не видели",

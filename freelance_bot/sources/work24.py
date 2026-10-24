@@ -1,8 +1,8 @@
 """Work24: операции API Anything из work24.json, только чтение.
 
 Файл операций снят инструментом goodnight000/api-anything с публичного интерфейса Work24
-(без входа и ключа). Бот исполняет его сам, без Node.js и браузера: все операции —
-tier 1, то есть обычный GET (docs/platforms.md, §3; ADR 0008).
+(без входа и ключа). Бот исполняет его сам (`api_anything.py`), без Node.js и браузера: все
+операции — tier 1, то есть обычный GET (docs/platforms.md, §3; ADR 0008).
 
 - listItOrders / listOrders(page) — JSON `orders`, поля по `pick` («новое=старое»): id, slug,
   title, created_at (unix), deadline («Срок сдачи», unix), price (строка «1200» или
@@ -16,22 +16,24 @@ tier 1, то есть обычный GET (docs/platforms.md, §3; ADR 0008).
 
 from __future__ import annotations
 
-import json
 import logging
 import math
 import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
 
 from freelance_bot.config import ConfigError
 from freelance_bot.http import BlockedError, Fetcher, SourceError
 from freelance_bot.models import Platform, Project
-from freelance_bot.sources import SourceFormatError
+from freelance_bot.sources import SourceFormatError, api_anything
+from freelance_bot.sources.api_anything import (
+    extract_html,
+    extract_json,
+    operation_request,
+    parse_selector,
+)
 
 log = logging.getLogger(__name__)
 
@@ -41,168 +43,12 @@ OPEN_STATUS = "Открыт"
 IT_GROUP = "Разработка и IT"  # раздел ленты listItOrders: в её pick нет поля group
 MAX_PAGES = 2  # по 20 заказов; в «Разработка и IT» открыто около 60
 MAX_DETAILS = 15  # карточек за цикл; остальные новые — в следующем цикле
-# Заголовки браузера из записи API Anything не шлём: бот представляется честно (http.py)
-_BROWSER_HEADERS = ("user-agent", "sec-", "priority", "upgrade-insecure-requests")
 _SLUG_RE = re.compile(r"[0-9a-z][0-9a-z-]*", re.IGNORECASE)
-_SIMPLE_RE = re.compile(r"(?P<tag>[a-z][a-z0-9-]*)?(?P<classes>(?:\.[\w-]+)*)", re.IGNORECASE)
-_VOID_TAGS = frozenset(
-    {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "source",
-     "track", "wbr"}
-)  # fmt: skip
-_BLOCK_TAGS = frozenset(
-    {"p", "div", "br", "li", "ul", "ol", "h1", "h2", "h3", "h4", "h5", "h6", "tr",
-     "blockquote", "pre"}
-)  # fmt: skip
-
-
-# ── операции API Anything ────────────────────────────────────────────────────
 
 
 def load_operations(path: Path = OPERATIONS_PATH) -> dict[str, dict[str, Any]]:
-    """Операции по имени. Бот выполняет только чтение без браузера — иначе ConfigError."""
-    try:
-        raw = json.loads(Path(path).read_text("utf-8"))
-        items = raw["operations"]
-    except (OSError, ValueError, KeyError, TypeError) as exc:
-        raise ConfigError(
-            f"{path}: файл операций Work24 не читается ({type(exc).__name__})"
-        ) from None
-    operations: dict[str, dict[str, Any]] = {}
-    for op in items:
-        name = op.get("name")
-        request = op.get("request") or {}
-        if request.get("method") != "GET" or op.get("readOnly") is not True:
-            raise ConfigError(f"{path}: операция {name} не только для чтения — бот её не выполнит")
-        if op.get("minTier", 1) != 1 or op.get("volatile"):
-            raise ConfigError(f"{path}: операции {name} нужен браузер — бот её не выполнит")
-        if (op.get("response") or {}).get("format") not in ("json", "html"):
-            raise ConfigError(f"{path}: у операции {name} неизвестный формат ответа")
-        operations[name] = op
-    return operations
-
-
-def operation_request(op: dict[str, Any], params: dict[str, object]) -> tuple[str, dict]:
-    """Адрес со значениями слотов ({page} в шаблоне записан как %7Bpage%7D) и заголовки."""
-    url = op["request"]["url"]
-    for name, value in params.items():
-        quoted = quote(str(value), safe="")
-        url = url.replace(f"%7B{name}%7D", quoted).replace(f"{{{name}}}", quoted)
-    if "%7B" in url or "{" in url:
-        raise SourceFormatError(f"Work24: в адресе операции {op['name']} не задан слот")
-    headers = {
-        key: value
-        for key, value in (op["request"].get("headers") or {}).items()
-        if not key.lower().startswith(_BROWSER_HEADERS)
-    }
-    return url, headers
-
-
-def extract_json(op: dict[str, Any], text: str) -> list[dict[str, Any]]:
-    """`extract` — ключ со списком, `pick` — поля «имя» или «новое=старое»."""
-    spec = op["response"]
-    try:
-        rows = json.loads(text)[spec["extract"]]
-    except (ValueError, KeyError, TypeError) as exc:
-        raise SourceFormatError(f"Work24: {op['name']} — ответ не того вида") from exc
-    if not isinstance(rows, list) or not all(isinstance(row, dict) for row in rows):
-        raise SourceFormatError(f"Work24: {op['name']} — «{spec['extract']}» не список")
-    fields = [field.partition("=") for field in spec["pick"]]
-    return [{name: row.get(source or name) for name, _, source in fields} for row in rows]
-
-
-def extract_html(op: dict[str, Any], text: str) -> dict[str, str | None]:
-    """Текст первого элемента под каждым селектором поля; нет элемента — None."""
-    spec = op["response"]["html"]
-    scope = _parse_selector(spec["items"])
-    chains = {name: scope + _parse_selector(sel) for name, sel in spec["fields"].items()}
-    parser = _FieldsParser(chains)
-    parser.feed(text)
-    parser.close()
-    return {name: _text(parser.texts[name]) if name in parser.texts else None for name in chains}
-
-
-# ── CSS-селекторы: «тег», «.класс», «тег.класс» через пробел (потомок) ────────
-
-
-@dataclass(frozen=True)
-class _Simple:
-    tag: str | None
-    classes: frozenset[str]
-
-    def matches(self, tag: str, classes: frozenset[str]) -> bool:
-        return (self.tag is None or self.tag == tag) and self.classes <= classes
-
-
-def _parse_selector(selector: str) -> tuple[_Simple, ...]:
-    chain = []
-    for part in selector.split():
-        m = _SIMPLE_RE.fullmatch(part)
-        if not m or not (m["tag"] or m["classes"]):
-            raise SourceFormatError(f"Work24: селектор {selector!r} не поддерживается")
-        tag = m["tag"].lower() if m["tag"] else None
-        chain.append(_Simple(tag, frozenset(m["classes"].split(".")[1:])))
-    if not chain:
-        raise SourceFormatError("Work24: пустой селектор")
-    return tuple(chain)
-
-
-def _chain_matches(chain: tuple[_Simple, ...], stack: list[tuple[str, frozenset[str]]]) -> bool:
-    """Последний селектор — сам элемент, остальные — его предки в том же порядке."""
-    if not chain[-1].matches(*stack[-1]):
-        return False
-    need = len(chain) - 2
-    for tag, classes in reversed(stack[:-1]):
-        if need < 0:
-            break
-        if chain[need].matches(tag, classes):
-            need -= 1
-    return need < 0
-
-
-class _FieldsParser(HTMLParser):
-    def __init__(self, chains: dict[str, tuple[_Simple, ...]]) -> None:
-        super().__init__(convert_charrefs=True)
-        self._chains = chains
-        self._stack: list[tuple[str, frozenset[str]]] = []
-        self._open: dict[str, int] = {}  # поле → глубина его элемента в стеке
-        self.texts: dict[str, list[str]] = {}
-
-    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        if tag in _BLOCK_TAGS:
-            self._newline()
-        if tag in _VOID_TAGS:
-            return
-        classes = frozenset(next((v or "" for k, v in attrs if k == "class"), "").split())
-        self._stack.append((tag, classes))
-        for name, chain in self._chains.items():
-            if name not in self.texts and _chain_matches(chain, self._stack):
-                self.texts[name] = []
-                self._open[name] = len(self._stack)
-
-    def handle_endtag(self, tag: str) -> None:
-        if tag in _BLOCK_TAGS:
-            self._newline()
-        for depth in range(len(self._stack) - 1, -1, -1):
-            if self._stack[depth][0] == tag:
-                del self._stack[depth:]
-                break
-        self._open = {name: d for name, d in self._open.items() if d <= len(self._stack)}
-
-    def handle_data(self, data: str) -> None:
-        if self._stack and self._stack[-1][0] in ("script", "style"):
-            return
-        for name in self._open:
-            self.texts[name].append(data)
-
-    def _newline(self) -> None:
-        for name in self._open:
-            self.texts[name].append("\n")
-
-
-def _text(parts: list[str]) -> str:
-    """Абзацы — отдельными строками, пробелы внутри строки схлопнуты."""
-    lines = (" ".join(line.split()) for line in "".join(parts).split("\n"))
-    return "\n".join(line for line in lines if line)
+    """Операции Work24 по имени (исполнитель — sources/api_anything.py)."""
+    return api_anything.load_operations(path, "Work24")
 
 
 # ── источник ─────────────────────────────────────────────────────────────────
@@ -241,8 +87,8 @@ class Work24Source:
         self._clock = clock
         self._closed: set[str] = set()  # карточка уже не «Открыт»: не открывать снова
         # Класс поля описания: есть в ответе — это карточка заказа, а не страница блокировки
-        description = _parse_selector(self._ops[CARD_OPERATION]["response"]["html"]["fields"]
-                                      ["description"])  # fmt: skip
+        description = parse_selector(self._ops[CARD_OPERATION]["response"]["html"]["fields"]
+                                     ["description"])  # fmt: skip
         self._card_marker = min(description[-1].classes, default=None)
 
     async def fetch(self) -> list[Project]:

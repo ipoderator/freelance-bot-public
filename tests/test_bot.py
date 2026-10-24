@@ -703,7 +703,10 @@ def test_disabled_kwork_runs_only_with_include_disabled(capsys):
 
     settings = load_settings(ROOT / "settings.toml", ROOT / "no-such.env")
     on = {name: replace(settings.sources[name], enabled=True) for name in ("fl", "work24")}
-    off = {name: replace(settings.sources[name], enabled=False) for name in ("kwork", "hh")}
+    off = {
+        name: replace(settings.sources[name], enabled=False)
+        for name in ("kwork", "freelance_ru", "workzilla", "hh")
+    }
     settings = replace(settings, sources={**settings.sources, **on, **off})
     assert cli.enabled_platforms(settings, None, include_disabled=False) == ["fl", "work24"]
     assert cli.enabled_platforms(settings, "kwork", include_disabled=True) == ["kwork"]
@@ -798,3 +801,23 @@ async def test_last_lists_vacancy_with_company_and_salary(env, make_project):
     update, message, _ = update_from(OWNER, "applied:hh:t1")
     await env.handlers.button(update, None)
     assert "Вакансия убрана из /last" in message.replies[0]
+
+
+def test_freelance_ru_and_workzilla_sources_check_their_own_platform(make_project):
+    from dataclasses import replace
+
+    from freelance_bot.sources.freelance_ru import FreelanceRuSource
+    from freelance_bot.sources.workzilla import WorkzillaSource
+
+    settings = load_settings(ROOT / "settings.toml", ROOT / "no-such.env")
+    on = {n: replace(settings.sources[n], enabled=True) for n in ("freelance_ru", "workzilla")}
+    settings = replace(settings, sources={**settings.sources, **on})
+    storage = Storage(":memory:")
+    storage.upsert_project(make_project(platform="freelance_ru", external_id="13419"))
+    storage.upsert_project(make_project(platform="work24", external_id="27"))
+    frl, wz = (cli.build_sources(settings, name, False, storage)[0]
+               for name in ("freelance_ru", "workzilla"))  # fmt: skip
+    assert isinstance(frl, FreelanceRuSource) and isinstance(wz, WorkzillaSource)
+    assert frl._known("13419") and not frl._known("27")
+    assert not wz._known("27")  # id другой площадки — не «известное» задание
+    storage.close()

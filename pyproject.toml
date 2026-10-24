@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "freelance-bot"
 version = "1.0.0"
-description = "Персональный Telegram-бот: свежие заказы FL.ru, Kwork, Work24 и вакансии HH.ru под профиль, черновики откликов"
+description = "Персональный Telegram-бот: свежие заказы FL.ru, Kwork, Work24, Freelance.ru, Work-zilla и вакансии HH.ru под профиль, черновики откликов"
 requires-python = ">=3.11"
 dependencies = [
     "python-telegram-bot[job-queue]~=21.0",
@@ -30,7 +30,7 @@ dev = [
 include = ["freelance_bot*"]
 
 [tool.setuptools.package-data]
-# операции API Anything для Work24 (freelance_bot/sources/work24.py)
+# операции API Anything: Work24, Freelance.ru, Work-zilla (freelance_bot/sources/api_anything.py)
 "freelance_bot.sources" = ["*.json"]
 
 [tool.pytest.ini_options]

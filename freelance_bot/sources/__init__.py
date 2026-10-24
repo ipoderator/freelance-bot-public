@@ -1,5 +1,6 @@
-"""Источники проектов: FL.ru (официальный RSS), Kwork (публичная страница биржи), Work24
-(операции API Anything), HH.ru (вакансии из сообщений бота HH в Telegram пользователя)."""
+"""Источники проектов: FL.ru (официальный RSS), Kwork (публичная страница биржи), Work24,
+Freelance.ru и Work-zilla (операции API Anything), HH.ru (вакансии из сообщений бота HH в
+Telegram пользователя)."""
 
 from __future__ import annotations
 

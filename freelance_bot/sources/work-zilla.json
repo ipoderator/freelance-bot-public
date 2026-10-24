@@ -1,0 +1,121 @@
+{
+  "name": "work-zilla",
+  "baseUrl": "https://client.work-zilla.com",
+  "operations": [
+    {
+      "name": "feedStatus",
+      "description": "Статус ленты исполнителя; isStaticOrders=true означает демонстрационные задания",
+      "request": {
+        "method": "GET",
+        "url": "https://client.work-zilla.com/api/order/v6/list/open?hideInsolvoOrders=false",
+        "headers": {
+          "accept": "*/*",
+          "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+          "agentid": "",
+          "cache-control": "no-cache",
+          "pragma": "no-cache",
+          "priority": "u=1, i",
+          "referer": "https://client.work-zilla.com/freelancer",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"macOS\"",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-origin",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+        }
+      },
+      "slots": [
+        {
+          "ref": "session:feedStatus/WzAgentId",
+          "at": [
+            "header:agentid"
+          ]
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "https://client.work-zilla.com/freelancer"
+      },
+      "match": {
+        "method": "GET",
+        "host": "client.work-zilla.com",
+        "path": "/api/order/v6/list/open"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json; charset=utf-8",
+        "extract": "data",
+        "pick": [
+          "isStaticOrders",
+          "openOrdersCount",
+          "haveMoreOrders"
+        ]
+      },
+      "params": [],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "listVisibleOrders",
+      "description": "Видимые задания Work-zilla; перед использованием проверить feedStatus.isStaticOrders",
+      "request": {
+        "method": "GET",
+        "url": "https://client.work-zilla.com/api/order/v6/list/open?hideInsolvoOrders=false",
+        "headers": {
+          "accept": "*/*",
+          "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+          "agentid": "",
+          "cache-control": "no-cache",
+          "pragma": "no-cache",
+          "priority": "u=1, i",
+          "referer": "https://client.work-zilla.com/freelancer",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"macOS\"",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-origin",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+        }
+      },
+      "slots": [
+        {
+          "ref": "session:listVisibleOrders/WzAgentId",
+          "at": [
+            "header:agentid"
+          ]
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "https://client.work-zilla.com/freelancer"
+      },
+      "match": {
+        "method": "GET",
+        "host": "client.work-zilla.com",
+        "path": "/api/order/v6/list/open"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json; charset=utf-8",
+        "extract": "data.other",
+        "pick": [
+          "id",
+          "subject",
+          "description",
+          "price",
+          "modified",
+          "categoryId",
+          "status",
+          "archived"
+        ]
+      },
+      "params": [],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    }
+  ]
+}

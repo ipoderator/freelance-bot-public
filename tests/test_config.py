@@ -324,3 +324,36 @@ def test_hh_chat_default_validation_and_telegram_keys(tmp_path: Path) -> None:
     assert session not in repr(s) and "hashhash" not in repr(s)
     with pytest.raises(ConfigError, match="HH_TG_API_ID"):
         load_settings(path, env_file=write_env(tmp_path, HH_TG_API_ID="abc"))
+
+
+def test_freelance_ru_and_workzilla_sources_and_session(tmp_path: Path) -> None:
+    path = write_settings(tmp_path)
+    base = path.read_text("utf-8")
+    s = load_settings(path, env_file=tmp_path / "none.env")
+    for platform in ("freelance_ru", "workzilla"):  # раздела нет — выключена
+        assert (s.sources[platform].enabled, s.sources[platform].interval_sec) == (False, 600)
+    assert (s.workzilla_cookie, s.workzilla_agent_id) == (None, None)
+    assert s.sources["freelance_ru"].categories == ["Веб-разработка и IT", "ИИ и Нейросети"]
+
+    path.write_text(base + "\n[sources.workzilla]\nenabled = true\nmode = \"notify\"\n", "utf-8")
+    cookie, agent = "Bearer=not-a-real-bearer-value", "not-a-real-agent-id"
+    s = load_settings(
+        path, env_file=write_env(tmp_path, WORKZILLA_COOKIE=cookie, WORKZILLA_AGENT_ID=agent)
+    )
+    assert s.sources["workzilla"].enabled and s.sources["workzilla"].mode == "notify"
+    assert (s.workzilla_cookie, s.workzilla_agent_id) == (cookie, agent)
+    assert cookie not in repr(s) and agent not in repr(s)
+    with pytest.raises(ConfigError, match="только для sources.work24"):
+        path.write_text(base + '\n[sources.freelance_ru]\noperations = ["listTasks"]\n', "utf-8")
+        load_settings(path, env_file=tmp_path / "none.env")
+
+    path.write_text(base + "\n[sources.freelance_ru]\ncategories = []\n", "utf-8")
+    s = load_settings(path, env_file=tmp_path / "none.env")
+    assert s.sources["freelance_ru"].categories == []  # все разделы
+    for bad in ('"Веб-разработка и IT"', '[""]', "[1]"):
+        path.write_text(base + f"\n[sources.freelance_ru]\ncategories = {bad}\n", "utf-8")
+        with pytest.raises(ConfigError, match="sources.freelance_ru.categories"):
+            load_settings(path, env_file=tmp_path / "none.env")
+    path.write_text(base + '\n[sources.work24]\ncategories = ["x"]\n', "utf-8")
+    with pytest.raises(ConfigError, match="только для sources.freelance_ru"):
+        load_settings(path, env_file=tmp_path / "none.env")

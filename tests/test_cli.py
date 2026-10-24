@@ -168,3 +168,47 @@ def test_hh_login_failure_writes_nothing_and_hides_details(tmp_path, capsys, mon
     out = capsys.readouterr().out
     assert code == 1 and "RuntimeError" in out and "+7999" not in out
     assert "HH_TG_SESSION" not in env.read_text()
+
+
+def test_workzilla_session_writes_env_and_never_prints_values(tmp_path, capsys):
+    import json
+
+    bearer, agent = "fake-bearer-0123456789", "fake-agent-0123456789"
+    session = tmp_path / "work-zilla.json"
+    session.write_text(json.dumps({
+        "cookies": [{"name": "Bearer", "value": bearer, "domain": ".work-zilla.com",
+                     "expires": -1}],
+        "values": {"feedStatus/WzAgentId": agent},
+    }), "utf-8")  # fmt: skip
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_OWNER_ID=42\n")
+
+    code = cli.main(cli_args(tmp_path, env, "workzilla-session", "--from", str(session)))
+
+    out = capsys.readouterr().out
+    assert code == 0 and "записана" in out
+    assert bearer not in out and agent not in out
+    text = env.read_text()
+    assert f"WORKZILLA_COOKIE=Bearer={bearer}" in text and f"WORKZILLA_AGENT_ID={agent}" in text
+    assert "TELEGRAM_OWNER_ID=42" in text
+    assert env.stat().st_mode & 0o777 == 0o600
+
+
+def test_workzilla_session_without_bearer_writes_nothing(tmp_path, capsys):
+    session = tmp_path / "work-zilla.json"
+    session.write_text('{"cookies": [], "values": {}}', "utf-8")
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_OWNER_ID=42\n")
+    code = cli.main(cli_args(tmp_path, env, "workzilla-session", "--from", str(session)))
+    assert code == 2 and "Bearer" in capsys.readouterr().out
+    assert env.read_text() == "TELEGRAM_OWNER_ID=42\n"
+
+
+def test_log_hides_workzilla_cookie_values():
+    formatter = cli.RedactingFormatter(
+        "%(message)s", ["Bearer=b-0123456789; BrowserId=id-0123456789", "agent-0123456789",
+                        *cli._cookie_values("Bearer=b-0123456789; BrowserId=id-0123456789; x=1")],
+    )  # fmt: skip
+    record = logging.LogRecord("t", logging.WARNING, "", 0, "cookie b-0123456789 agent-0123456789"
+                               " id-0123456789 x=1", None, None)  # fmt: skip
+    assert formatter.format(record) == "cookie *** *** *** x=1"

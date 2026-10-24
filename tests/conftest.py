@@ -12,7 +12,7 @@ from freelance_bot.models import Project
 SECRET_ENV_VARS = (
     "TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "ANTHROPIC_API_KEY", "LLM_MODEL",
     "OPENAI_API_KEY", "OPENAI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
-    "HH_TG_API_ID", "HH_TG_API_HASH", "HH_TG_SESSION",
+    "HH_TG_API_ID", "HH_TG_API_HASH", "HH_TG_SESSION", "WORKZILLA_COOKIE", "WORKZILLA_AGENT_ID",
 )  # fmt: skip
 REPO_ROOT = Path(__file__).resolve().parent.parent
 

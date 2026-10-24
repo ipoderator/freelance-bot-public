@@ -1,0 +1,134 @@
+{
+  "name": "freelance-ru",
+  "baseUrl": "https://freelance.ru",
+  "operations": [
+    {
+      "name": "getPublicTask",
+      "description": "Публичная карточка задания Freelance.ru; Premium-задания могут быть скрыты",
+      "request": {
+        "method": "GET",
+        "url": "https://freelance.ru/task/view/%7BtaskId%7D",
+        "headers": {
+          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+          "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+          "priority": "u=0, i",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"macOS\"",
+          "sec-fetch-dest": "document",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-site": "none",
+          "sec-fetch-user": "?1",
+          "upgrade-insecure-requests": "1",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+        }
+      },
+      "slots": [
+        {
+          "param": "taskId",
+          "at": [
+            "path:2"
+          ]
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "https://freelance.ru/task/view/{taskId}"
+      },
+      "match": {
+        "method": "GET",
+        "host": "freelance.ru",
+        "path": "/task/view/*"
+      },
+      "response": {
+        "format": "html",
+        "contentType": "text/html; charset=UTF-8",
+        "html": {
+          "items": "body",
+          "fields": {
+            "title": "#task .tv-hero h1",
+            "content": "#task .tv-hero",
+            "budget": "#task .tv-meta-item__val--budget",
+            "category": "#task .task-chip--cat",
+            "published_at": "#task .time-meta@title",
+            "client": "#task .cust__name"
+          }
+        }
+      },
+      "params": [
+        {
+          "name": "taskId",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "listTasks",
+      "request": {
+        "method": "GET",
+        "url": "https://freelance.ru/task?page=%7Bpage%7D",
+        "headers": {
+          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+          "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+          "priority": "u=0, i",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"macOS\"",
+          "sec-fetch-dest": "document",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-site": "none",
+          "sec-fetch-user": "?1",
+          "upgrade-insecure-requests": "1",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+        }
+      },
+      "slots": [
+        {
+          "param": "page",
+          "at": [
+            "query:page"
+          ]
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "https://freelance.ru/task?page={page}"
+      },
+      "match": {
+        "method": "GET",
+        "host": "freelance.ru",
+        "path": "/task"
+      },
+      "response": {
+        "format": "html",
+        "contentType": "text/html; charset=UTF-8",
+        "html": {
+          "items": ".task-feed-list article.task-card",
+          "fields": {
+            "title": ".task-card__title-link",
+            "url": ".task-card__title-link@href",
+            "description": ".task-card__desc",
+            "category": ".task-chip--cat",
+            "published_at": ".task-card__foot-item@title",
+            "budget": ".task-card__budget",
+            "access": ".task-card__badges"
+          }
+        }
+      },
+      "params": [
+        {
+          "name": "page",
+          "type": "string",
+          "required": true
+        }
+      ],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    }
+  ]
+}

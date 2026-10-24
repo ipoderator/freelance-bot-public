@@ -1,4 +1,4 @@
-"""Командная строка: init, run, once, setup-telegram, hh-login."""
+"""Командная строка: init, run, once, setup-telegram, hh-login, workzilla-session."""
 
 from __future__ import annotations
 
@@ -21,9 +21,11 @@ from freelance_bot.pipeline import ConsoleNotifier, Pipeline
 from freelance_bot.profile import ProfileError, load_profile
 from freelance_bot.sources import Source
 from freelance_bot.sources.fl import FlSource
+from freelance_bot.sources.freelance_ru import FreelanceRuSource
 from freelance_bot.sources.hh import HhSource, TelethonReader
 from freelance_bot.sources.kwork import KworkSource
 from freelance_bot.sources.work24 import Work24Source
+from freelance_bot.sources.workzilla import WorkzillaSource, session_from_api_anything
 from freelance_bot.storage import Storage
 from freelance_bot.summary import make_summarizer
 from freelance_bot.telegram_ui import KWORK_WARNING, PLATFORM_NAMES
@@ -53,6 +55,16 @@ HH_LOGIN_NEXT = (
     "  2. В settings.toml в [sources.hh] поставьте enabled = true.\n"
     "  3. Используйте сессию на одной машине: одновременный запуск на Mac и на сервере "
     "Telegram считает угоном и отзывает её (AUTH_KEY_DUPLICATED)."
+)
+
+WORKZILLA_SESSION_NEXT = (
+    "Дальше:\n"
+    "  1. Проверьте ленту: .venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once "
+    "--dry-run --console --platform workzilla --include-disabled\n"
+    "     Пока Work-zilla отдаёт демонстрационные задания, бот пишет «лента демонстрационная» "
+    "и ничего не сохраняет.\n"
+    "  2. Когда лента станет настоящей, в settings.toml в [sources.workzilla] поставьте "
+    "enabled = true."
 )
 
 TELEGRAM_FAILURE_HINT = (
@@ -85,6 +97,8 @@ def _setup_logging(settings: Settings | None) -> None:
         [
             settings.telegram_token, settings.anthropic_api_key, settings.openai_api_key,
             settings.groq_api_key, settings.hh_tg_api_hash, settings.hh_tg_session,
+            settings.workzilla_cookie, settings.workzilla_agent_id,
+            *_cookie_values(settings.workzilla_cookie),
         ]  # fmt: skip
         if settings
         else []
@@ -95,6 +109,12 @@ def _setup_logging(settings: Settings | None) -> None:
     # httpx на INFO печатает полный адрес запроса — а в нём токен бота.
     for noisy in ("httpx", "httpcore", "telegram", "apscheduler", "telethon"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
+
+
+def _cookie_values(cookie: str | None) -> list[str]:
+    """Значения из строки Cookie по отдельности: в логе может оказаться одно из них."""
+    values = (part.partition("=")[2].strip() for part in (cookie or "").split(";"))
+    return [v for v in values if len(v) >= 8]  # короткие («1», «ru») — не секрет и шум
 
 
 def _is_telegram_failure(exc: BaseException, token: str | None) -> bool:
@@ -125,12 +145,17 @@ def build_sources(
     include_disabled: bool,
     storage: Storage | None = None,
 ) -> list[Source]:
-    """`storage` — чтобы Work24 не открывал карточки заказов, которые уже есть в базе."""
+    """`storage` — чтобы Work24 и Freelance.ru не открывали карточки, которые уже есть в базе."""
     fetcher = Fetcher()
     _fetchers.append(fetcher)
     sources: list[Source] = []
     for name in enabled_platforms(settings, platform, include_disabled):
         src = settings.sources[name]
+        known = (
+            (lambda external_id, name=name: storage.get_project(name, external_id) is not None)
+            if storage is not None
+            else (lambda external_id: False)
+        )
         if name == "hh":
             reader = TelethonReader(
                 settings.hh_tg_api_id, settings.hh_tg_api_hash, settings.hh_tg_session, src.chat
@@ -138,15 +163,26 @@ def build_sources(
             _readers.append(reader)
             sources.append(HhSource(reader))
         elif name == "work24":
-            known = (
-                (lambda external_id: storage.get_project("work24", external_id) is not None)
-                if storage is not None
-                else (lambda external_id: False)
-            )
             sources.append(
                 Work24Source(
                     fetcher, src.operations, max_age_hours=settings.max_age_hours, known=known
                 )
+            )
+        elif name == "freelance_ru":
+            sources.append(
+                FreelanceRuSource(
+                    fetcher, max_age_hours=settings.max_age_hours, categories=src.categories,
+                    known=known,
+                )  # fmt: skip
+            )
+        elif name == "workzilla":
+            own = Fetcher()  # cookie сессии не попадают в общий клиент других площадок
+            _fetchers.append(own)
+            sources.append(
+                WorkzillaSource(
+                    own, settings.workzilla_cookie, settings.workzilla_agent_id,
+                    max_age_hours=settings.max_age_hours, known=known,
+                )  # fmt: skip
             )
         else:
             sources.append(
@@ -408,6 +444,21 @@ def _cmd_hh_login(args: argparse.Namespace, settings: Settings) -> int:
     return 0
 
 
+def _cmd_workzilla_session(args: argparse.Namespace) -> int:
+    """Сессия Work-zilla из api-anything → WORKZILLA_COOKIE и WORKZILLA_AGENT_ID в .env."""
+    from freelance_bot.setup_wizard import update_env_file
+
+    cookie, agent_id = session_from_api_anything(Path(args.source))
+    env_path = Path(args.env_file)
+    backup = update_env_file(
+        env_path, {"WORKZILLA_COOKIE": cookie, "WORKZILLA_AGENT_ID": agent_id}
+    )
+    saved = f" (прежний — {backup.name})" if backup else ""
+    print(f"✓ Сессия Work-zilla записана в {env_path}{saved}; значения не показываю.")
+    print(WORKZILLA_SESSION_NEXT)
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="python -m freelance_bot")
     parser.add_argument("--settings", default="settings.toml", help="путь к settings.toml")
@@ -438,6 +489,13 @@ def build_parser() -> argparse.ArgumentParser:
     hh_login.add_argument(
         "--code", action="store_true", help="вход по коду из Telegram вместо QR-кода"
     )
+    wz = sub.add_parser(
+        "workzilla-session", help="перенести сессию Work-zilla из api-anything в .env"
+    )
+    wz.add_argument(
+        "--from", dest="source", required=True,
+        help="файл сессии api-anything: <API_ANYTHING_HOME>/sessions/work-zilla.json",
+    )  # fmt: skip
     return parser
 
 
@@ -457,6 +515,8 @@ def main(argv: list[str] | None = None) -> int:
             return _cmd_setup(settings)
         if args.command == "hh-login":
             return _cmd_hh_login(args, settings)
+        if args.command == "workzilla-session":
+            return _cmd_workzilla_session(args)
         if args.command == "once":
             return asyncio.run(_cmd_once(args, settings))
         return _cmd_run(args, settings)

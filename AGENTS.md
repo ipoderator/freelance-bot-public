@@ -1,7 +1,7 @@
 <!-- autopilot:start -->
 # Freelance Bot
 
-Telegram-бот для фрилансера: находит свежие заказы на FL.ru, Kwork и Work24 под профиль владельца и готовит персональные отклики; присылает подходящие вакансии HH.ru (без откликов).
+Telegram-бот для фрилансера: находит свежие заказы на FL.ru, Kwork, Work24, Freelance.ru и Work-zilla под профиль владельца и готовит персональные отклики; присылает подходящие вакансии HH.ru (без откликов).
 
 Архитектура, поток данных, границы модулей: `docs/architecture.md`. Проверенные факты о площадках: `docs/platforms.md`. Почему так решено: `docs/adr/`. Термины: `CONTEXT.md`.
 
@@ -17,6 +17,9 @@ Telegram-бот для фрилансера: находит свежие зак�
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform fl --max-age-hours 48` | dry-run FL: ходит в сеть, карточки в консоль, отдельная БД |
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform kwork --include-disabled` | разовый прогон Kwork (в настройках выключен) |
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform work24 --max-age-hours 96` | разовый прогон Work24: лента + карточки новых заказов |
+| `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform freelance_ru --max-age-hours 48` | разовый прогон Freelance.ru: первая страница /task + карточки новых заданий IT-разделов |
+| `.venv/bin/python -m freelance_bot workzilla-session --from <API_ANYTHING_HOME>/sessions/work-zilla.json` | сессия Work-zilla из api-anything → `WORKZILLA_COOKIE`, `WORKZILLA_AGENT_ID` в `.env` (600); значения не печатает |
+| `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform workzilla --include-disabled` | разовый прогон Work-zilla: пока лента демонстрационная — ошибка «лента демонстрационная», ничего не сохраняется |
 | `.venv/bin/pip install -e '.[login]' && .venv/bin/python -m freelance_bot hh-login` | разовый вход в свой Telegram для вакансий HH: QR-код (`--code` — по коду), сессия → `.env` (600); интерактивно, запускает пользователь |
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform hh --include-disabled --max-age-hours 48` | разовый прогон HH: читает чат с @hh_rabota_bot его сессией (только на машине, где бот не запущен) |
 | `.venv/bin/python -m freelance_bot setup-telegram` | getMe, setMyCommands, подсказка про TELEGRAM_OWNER_ID; без токена — шаги, код 1 |
@@ -32,7 +35,7 @@ Telegram-бот для фрилансера: находит свежие зак�
 - `settings.toml` — источники, URL лент, направления и ключевые слова, исключения, min_score; правится без кода.
 - `freelance_bot/scoring.py` — балл и отсечение; веса и общие слова `WEAK_TERMS` — константы в файле.
 - `freelance_bot/pricing.py` — ориентировочная цена и срок (вилки `TIERS`); подставляется вместо [ЦЕНА]/[СРОК] при показе.
-- `freelance_bot/sources/` — парсеры FL (RSS) и Kwork (HTML); Work24 — `work24.py` исполняет операции API Anything из `work24.json` (без Node.js); HH — `hh.py` читает сессией Telegram пользователя подборки бота @hh_rabota_bot (ADR 0009); `freelance_bot/http.py` — ретраи и детектор блокировок.
+- `freelance_bot/sources/` — парсеры FL (RSS) и Kwork (HTML); Work24, Freelance.ru, Work-zilla — `work24.py`, `freelance_ru.py`, `workzilla.py` исполняют операции API Anything из `work24.json`, `freelance-ru.json`, `work-zilla.json` через общий `api_anything.py` (без Node.js); HH — `hh.py` читает сессией Telegram пользователя подборки бота @hh_rabota_bot (ADR 0009); `freelance_bot/http.py` — ретраи и детектор блокировок.
 - `freelance_bot/drafting.py` (1100+ строк) + `profile/profile.toml` — черновики и валидатор; факты об опыте только из профиля.
 - `freelance_bot/summary.py` — суть заказа (📝) для карточки и `/last`.
 - `freelance_bot/policy.py` — `decide_mode`, `SENDERS`; `freelance_bot/storage.py` — SQLite и флаги.
@@ -59,6 +62,8 @@ CLI ставятся через uv: `uv tool install graphifyy`, `uv tool instal
 - Kwork: соглашение запрещает автосбор (ADR 0003); в `settings.toml` включён пользователем на свой риск (2026-10-22). Тесты не должны опираться на `enabled` из `settings.toml` — задавайте нужное значение в тесте.
 - RSS FL — форма `all.xml?category=N`; `/rss/?subcategory=` подкатегорию игнорирует (ADR 0004).
 - Work24: ленты из `api.work24.ru` (в robots.txt `Disallow: /`) — по решению пользователя (ADR 0008). Карточку (~0,5 МБ) открывать только для новых ID (`known` из `Storage`); `work24.json` не править руками — переобучать через `api-anything`.
+- Freelance.ru (ADR 0010): только `/task` без `?page=` (robots.txt); лента общая для всех разделов — карточки открываются лишь для `categories`; «Только для Премиум» пропускать (текст закрыт); контакты заказчика вырезаются из текста (`_without_contacts`), иначе «Телеграм: @ник» засчитывается направлением Telegram.
+- Work-zilla (ADR 0010): задания разбирать только при `isStaticOrders == false`; демо-лента и ответ без поля — ошибка источника, в базу ничего. Источник выключен, настоящая лента вживую не проверялась. Cookie сессии — только в своём `Fetcher` и в `RedactingFormatter`; не печатать.
 - RSS FL обрезает ТЗ («...» в конце, ~2/3 заказов): нейросеть видит пометку `TRUNCATED_NOTE` (`drafting.brief_block`), не убирать её.
 - FL-проекты без метки «для всех» — платный отклик; при `only_free_responses = true` отсекаются (причина «платный отклик»). Сейчас в `settings.toml` `false` и `min_score = 25` по решению пользователя; тесты фиксируют эти значения сами.
 - Правила правды в откликах зависят от профиля: `experience_years` (стаж больше — ложь; «5 лет» запрещено при стаже < 5), `built_bots_or_agents` (нет — «делал ботов» запрещено); отбор — `[scoring] experience_years`.
@@ -87,5 +92,6 @@ CLI ставятся через uv: `uv tool install graphifyy`, `uv tool instal
 - `OPENAI_MODEL` — модель GPT (по умолчанию `gpt-5-mini`).
 - `GROQ_API_KEY` — необязателен; задан — черновики и суть пишет Groq (тот же адаптер `openai_llm.py`, `groq()`), он важнее ключей OpenAI и Anthropic.
 - `HH_TG_API_ID`, `HH_TG_API_HASH`, `HH_TG_SESSION` — вакансии HH: приложение с my.telegram.org и сессия пользователя Telegram; пишет `hh-login`. Сессия = полный доступ к аккаунту.
+- `WORKZILLA_COOKIE`, `WORKZILLA_AGENT_ID` — сессия аккаунта исполнителя Work-zilla (cookie `Bearer` и заголовок `agentid`); пишет `workzilla-session`. Cookie = вход в аккаунт.
 - `GROQ_MODEL` — модель Groq (по умолчанию `openai/gpt-oss-120b`). Бесплатный тариф: 8K токенов в минуту, `max_completion_tokens` входит в счёт — потолок `GROQ_MAX_TOKENS`.
 

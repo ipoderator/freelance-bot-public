@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Literal, get_args
 
-Platform = Literal["fl", "kwork", "work24", "hh"]
+Platform = Literal["fl", "kwork", "work24", "freelance_ru", "workzilla", "hh"]
 Mode = Literal["notify", "draft", "auto"]
 
 PLATFORMS: tuple[str, ...] = get_args(Platform)
@@ -17,7 +17,7 @@ MODES: tuple[str, ...] = get_args(Mode)
 class Project:
     platform: Platform
     external_id: str  # FL: число из URL /projects/<id>/; Kwork: wants.id; Work24: id заказа;
-    # HH: id вакансии из hh.ru/vacancy/<id>
+    # Freelance.ru: число из /task/view/<id>; Work-zilla: id задания; HH: vacancy_key
     url: str
     title: str
     description: str  # полный или обрезанный текст ТЗ
@@ -26,7 +26,8 @@ class Project:
     budget_max: int | None
     offers_count: int | None  # None — нет данных
     category: str | None
-    deadline_days: int | None = None  # Kwork max_days; Work24 — дней до «Срок сдачи»
+    deadline_days: int | None = None  # Kwork max_days; Work24 — дней до «Срок сдачи»;
+    # Freelance.ru — «Срок» из карточки
     extra: dict = field(default_factory=dict)  # платформенные мелочи (buyer stats и т.п.)
 
 

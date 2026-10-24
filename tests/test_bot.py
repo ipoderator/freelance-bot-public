@@ -201,7 +201,12 @@ async def test_redraft_button_sends_new_draft_and_saves_it(env):
     # нажатие подтверждается до генерации: ответ LLM дольше, чем Telegram ждёт answer
     assert query.answers == ["Готовлю новый вариант…"]
     assert message.actions == ["typing"]
-    assert "новый вариант 1" in message.replies[0]
+    # тот же вид, что у выбранного заказа: текст блоком для копирования, поля и кнопки
+    assert "Вариант 2 отклика" in message.replies[0]
+    assert "<pre>новый вариант 1</pre>" in message.replies[0]
+    assert "Поля формы" in message.replies[0]
+    buttons = [b.callback_data for row in message.markups[0].inline_keyboard for b in row]
+    assert "redraft:fl:77" in buttons and "applied:fl:77" in buttons
     assert env.storage.recent_drafts() == ["новый вариант 1"]
     assert env.storage.get_status("fl", "77") == "new"  # статус не трогаем
 

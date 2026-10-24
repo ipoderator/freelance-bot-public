@@ -53,7 +53,6 @@ from freelance_bot.telegram_ui import (
     MENU_STATUS,
     PLATFORM_NAMES,
     format_applied,
-    format_draft,
     format_filters,
     format_offer,
     format_offer_hint,
@@ -446,7 +445,9 @@ class BotHandlers:
         )
         leftovers = remaining_placeholders(ready.draft.text)
         await message.reply_text(
-            format_offer(p, ready.draft, leftovers, ready.price_rub, ready.days, ready.own),
+            format_offer(
+                p, ready.draft, leftovers, ready.price_rub, ready.days, ready.own, ready.variant
+            ),
             parse_mode=ParseMode.HTML,
             reply_markup=markup,
             link_preview_options=LinkPreviewOptions(is_disabled=True),
@@ -530,11 +531,7 @@ class BotHandlers:
             if redrafted is None:
                 await query.message.reply_text("Не удалось собрать новый вариант.")
                 return
-            await query.message.reply_text(
-                format_draft(*redrafted),
-                parse_mode=ParseMode.HTML,
-                link_preview_options=LinkPreviewOptions(is_disabled=True),
-            )
+            await self._send_offer(query.message, redrafted)  # тот же вид: текст копируется
             return
         status = "applied" if action == "applied" else "skipped"
         self.storage.set_status(platform, external_id, status, "кнопка в Telegram")

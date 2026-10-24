@@ -22,6 +22,7 @@ from freelance_bot.drafting import (
     make_drafter,
     remaining_placeholders,
     similarity,
+    tidy_llm_text,
     validate_draft,
 )
 from freelance_bot.models import Project, ScoreResult
@@ -340,9 +341,10 @@ class FakeMessages:
 
     async def create(self, **kwargs):
         self.calls.append(kwargs)
-        if isinstance(self.result, Exception):
-            raise self.result
-        return self.result
+        result = self.result.pop(0) if isinstance(self.result, list) else self.result
+        if isinstance(result, Exception):
+            raise result
+        return result
 
 
 def fake_client(result) -> SimpleNamespace:
@@ -543,6 +545,70 @@ def test_experience_and_bot_claims_follow_the_profile(profile: Profile) -> None:
     four = dataclasses.replace(profile, experience_years=3)
     assert any("стаж разработки «4 года»" in p
                for p in validate_draft("Python-разработка: 4 года.", four, []))
+
+
+def test_llm_text_is_tidied_and_signed_last() -> None:
+    raw = "Здравствуйте!  \r\nПонял задачу.  \n\n\n\nИван\nКакой хостинг?  \n"
+    assert tidy_llm_text(raw, "Иван") == "Здравствуйте!\nПонял задачу.\n\nКакой хостинг?\nИван"
+    assert tidy_llm_text("Понял. Вопрос?", "Иван") == "Понял. Вопрос?\nИван"  # подписи не было
+    assert tidy_llm_text("  ", "Иван") == ""
+
+
+async def test_llm_reply_with_bare_question_mark_falls_back(
+    profile: Profile, llm_settings: Settings, tg_project: Project
+) -> None:
+    bare = GOOD_LLM_TEXT.replace("Сколько мастеров будет в салоне?", "[ДАТА СТАРТА — впиши]\n?")
+    draft = await LlmDrafter(profile, llm_settings, fake_client(reply(bare))).generate(
+        tg_project, TG_SCORE
+    )
+    assert draft.generator == "builtin"
+
+
+async def test_rejected_llm_reply_is_fixed_by_the_model_once(
+    profile: Profile, llm_settings: Settings, tg_project: Project
+) -> None:
+    no_price = GOOD_LLM_TEXT.replace("Стоимость: [ЦЕНА], срок: [СРОК]. ", "")
+    client = fake_client([reply(no_price), reply(GOOD_LLM_TEXT)])
+    draft = await LlmDrafter(profile, llm_settings, client).generate(tg_project, TG_SCORE)
+    assert draft.generator == "llm" and "[ЦЕНА]" in draft.text
+    fix = client.beta.messages.calls[1]["messages"]
+    assert [m["role"] for m in fix] == ["user", "assistant", "user"]
+    assert fix[1]["content"] == tidy_llm_text(no_price, "Иван")
+    assert "- нет метки [ЦЕНА]" in fix[2]["content"]
+
+    client = fake_client([reply(no_price), reply(no_price)])  # не исправила — встроенный
+    draft = await LlmDrafter(profile, llm_settings, client).generate(tg_project, TG_SCORE)
+    assert draft.generator == "builtin" and len(client.beta.messages.calls) == 2
+
+
+async def test_technology_outside_profile_in_experience_is_sent_back(
+    profile: Profile, llm_settings: Settings, tg_project: Project
+) -> None:
+    invented = (
+        "Здравствуйте! Понял задачу: бот записи в салон.\n\n"
+        "Предлагаю собрать бота на aiogram.\n\n"
+        "Опыт: писал сервисы на FastAPI и Flask, валидацию на Pydantic.\n\n"
+        "Стоимость: [ЦЕНА], срок: [СРОК].\n\nСколько мастеров будет в салоне?\nИван"
+    )
+    client = fake_client([reply(invented), reply(invented.replace(", валидацию на Pydantic", ""))])
+    draft = await LlmDrafter(profile, llm_settings, client).generate(tg_project, TG_SCORE)
+    assert draft.generator == "llm" and "Pydantic" not in draft.text
+    fix = client.beta.messages.calls[1]["messages"][2]["content"]
+    assert "Pydantic" in fix and "FastAPI" not in fix  # FastAPI есть в фактах профиля
+
+
+async def test_llm_variant_sees_previous_draft(
+    profile: Profile, llm_settings: Settings, tg_project: Project, storage: Storage
+) -> None:
+    storage.upsert_project(tg_project)
+    storage.add_response("fl", "101", "draft", "ПРОШЛЫЙ ТЕКСТ", "llm", False, "выбран заказ")
+    client = fake_client(reply(GOOD_LLM_TEXT))
+    drafter = LlmDrafter(profile, llm_settings, client, storage=storage)
+    await drafter.generate(tg_project, TG_SCORE, variant=0)
+    await drafter.generate(tg_project, TG_SCORE, variant=1)
+    first, second = (c["messages"][0]["content"] for c in client.beta.messages.calls)
+    assert "previous_draft" not in first  # первый вариант пишется с чистого листа
+    assert "<previous_draft>\nПРОШЛЫЙ ТЕКСТ\n</previous_draft>" in second
 
 
 async def test_llm_prompt_uses_profile_name_and_experience(

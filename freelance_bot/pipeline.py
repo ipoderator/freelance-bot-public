@@ -75,6 +75,7 @@ class Offer:
     price_rub: int
     days: int
     own: bool
+    variant: int = 0  # 0 — первый текст, 1 и дальше — кнопка «Другой вариант»
 
 
 @dataclass
@@ -289,10 +290,9 @@ class Pipeline:
 
     # ── кнопка «Другой вариант» ──────────────────────────────────────────────
 
-    async def redraft(
-        self, platform: Platform | str, external_id: str
-    ) -> tuple[Draft, bool] | None:
-        """Новый вариант черновика для показа (с ценой) и флаг «подставлена оценка»."""
+    async def redraft(self, platform: Platform | str, external_id: str) -> Offer | None:
+        """Новый вариант отклика — в том же виде, что выбранный заказ (`response`): текст с
+        ценой и сроком пользователя или оценкой бота, номер варианта."""
         p = self.storage.get_project(platform, external_id)
         result = self.storage.get_score(platform, external_id)
         if p is None or result is None:
@@ -305,8 +305,8 @@ class Pipeline:
             platform, external_id, "draft", draft.text, draft.generator, False, "другой вариант"
         )
         price, days, own = self._offer_values(p)
-        shown, filled = self._with_estimate(draft, price, days)
-        return shown, filled and not own
+        shown = Draft(fill_estimate(draft.text, price, days), draft.generator, False, False)
+        return Offer(p, shown, price, days, own, variant)
 
     # ── цена и срок от пользователя ──────────────────────────────────────────
 

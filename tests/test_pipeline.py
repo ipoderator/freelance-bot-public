@@ -328,11 +328,15 @@ async def test_redraft_makes_new_variant_and_records_it(settings, storage, make_
 
     redrafted = await pipeline.redraft("fl", "10")
 
-    assert redrafted is not None
-    draft, estimated = redrafted
-    assert draft.text.endswith("v1") and estimated is False  # в тексте нет меток
-    assert drafter.variants == [0, 1]
-    assert len(storage.recent_drafts()) == 2
+    assert redrafted is not None and redrafted.project.external_id == "10"
+    assert redrafted.draft.text.endswith("v1") and redrafted.variant == 1
+    guess = pipeline.estimate(p)  # поля формы — как у выбранного заказа: оценка бота
+    assert (redrafted.price_rub, redrafted.days, redrafted.own) == (
+        guess.price_rub, guess.days, False
+    )
+    assert (await pipeline.redraft("fl", "10")).variant == 2
+    assert drafter.variants == [0, 1, 2]
+    assert len(storage.recent_drafts()) == 3
     assert await pipeline.redraft("fl", "no-such") is None
 
 
@@ -533,5 +537,5 @@ async def test_fixed_price_from_settings_is_not_replaced_by_estimate(
 
     assert "Стоимость: 7 000 ₽, срок: 2 дня." in notifier.texts[0]
     assert "оценка бота" not in notifier.texts[0]
-    _, estimated = await pipeline.redraft("fl", "21")
-    assert estimated is False
+    redrafted = await pipeline.redraft("fl", "21")
+    assert redrafted.draft.text == "Стоимость: 7 000 ₽, срок: 2 дня. v1"

@@ -267,12 +267,24 @@ def format_applied(p: Project) -> str:
 
 
 def format_offer(
-    p: Project, d: Draft, leftovers: Sequence[str], price_rub: int, days: int, own: bool = False
+    p: Project,
+    d: Draft,
+    leftovers: Sequence[str],
+    price_rub: int,
+    days: int,
+    own: bool = False,
+    variant: int = 0,
 ) -> str:
-    """Готовый отклик: текст для копирования, значения полей формы и правила площадки."""
+    """Готовый отклик: текст для копирования, значения полей формы и правила площадки.
+
+    variant > 0 — ответ на «Другой вариант»: тот же вид, в заголовке номер варианта."""
     site = esc(PLATFORM_NAMES.get(p.platform, p.platform))
     url = html.escape(p.url, quote=True)
-    lines = [f"✉️ <b>Отклик для {site}:</b> {esc(p.title)}", f'🔗 <a href="{url}">Заказ</a>']
+    if variant:
+        head = f"🔄 <b>Вариант {variant + 1} отклика для {site}:</b>"
+    else:
+        head = f"✉️ <b>Отклик для {site}:</b>"
+    lines = [f"{head} {esc(p.title)}", f'🔗 <a href="{url}">Заказ</a>']
     if leftovers:
         lines += ["", f"⚠ Перед отправкой впишите: {esc(', '.join(leftovers))}"]
     lines += ["", "📋 <b>Текст</b> — нажмите на него, чтобы скопировать:"]

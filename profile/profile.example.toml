@@ -1,0 +1,131 @@
+# Пример профиля — вымышленный разработчик, не реальный человек. Свой профиль создаёт
+# мастер `python -m freelance_bot init` (пишет profile/profile.toml) или правьте этот файл.
+#
+# Профиль для черновиков откликов.
+#
+# confirmed_experience — ТОЛЬКО подтверждённый резюме опыт. У каждого факта:
+#   id     — короткий английский идентификатор;
+#   text   — как факт звучит в отклике;
+#   tags   — направления (backend, telegram, ai_agents, automation, parsing), к которым он относится;
+#   source — дословная строка из profile/resume_facts.txt (урезанный текст резюме).
+# target_directions — где беру заказы. Это НЕ опыт: в откликах не утверждается,
+#   что такие проекты уже выполнялись.
+
+name = "Иван"
+
+# Подтверждённый стаж разработки (1 год 10 месяцев): больший стаж в отклике — ложь.
+experience_years = 1.8
+# Telegram-ботов и AI-агентов в резюме нет: «делал ботов» в отклике запрещено.
+built_bots_or_agents = false
+
+target_directions = [
+  "Backend на Python: API, сервисы, интеграции",
+  "Telegram-боты",
+  "AI-агенты и интеграции с LLM",
+  "Автоматизация бизнес-процессов",
+  "Парсинг и сбор данных",
+]
+
+# Дополнительные запрещённые утверждения (регулярные выражения, регистр не важен).
+# Базовые правила — «5 лет Python», выполненные проекты с ботами/AI-агентами,
+# личные данные — встроены в валидатор и действуют всегда.
+forbidden_claims = [
+  "(senior|сеньор|тимлид|team ?lead)",
+  "(много|десятки|сотни)\\s+(успешных\\s+)?проектов",
+  "(гарантирую|гарантия)\\s+(результат|100)",
+]
+
+[contacts]
+# Личные данные в откликах выключены. Чтобы добавить контакт в подпись, впишите его
+# ниже (например, telegram = "@ник") и поставьте include_in_responses = true.
+include_in_responses = false
+
+[[confirmed_experience]]
+id = "backend_python"
+text = "1 год 10 месяцев коммерческой backend-разработки на Python"
+tags = ["backend"]
+source = "1 год 10 месяцев"
+
+[[confirmed_experience]]
+id = "fastapi_flask"
+text = "писал сервисы на FastAPI и Flask"
+tags = ["backend", "telegram", "ai_agents"]
+source = "— Писал сервисы на Python: FastAPI для новых API, Flask для внутренних инструментов"
+
+[[confirmed_experience]]
+id = "rest_integrations"
+text = "делал REST API и интеграции с внешними системами"
+tags = ["backend", "automation", "ai_agents", "telegram"]
+source = "— Делал REST API и интеграции с внешними системами, обмен событиями через Kafka"
+
+[[confirmed_experience]]
+id = "kafka"
+text = "работал с Kafka: обмен событиями между сервисами"
+tags = ["backend", "automation"]
+source = "— Писал продюсеров и консьюмеров Kafka для обмена событиями между сервисами"
+
+[[confirmed_experience]]
+id = "sql"
+text = "работал с PostgreSQL: запросы, миграции, обновление данных"
+tags = ["backend", "parsing", "telegram"]
+source = "— Работал с PostgreSQL: запросы, миграции, обновление данных"
+
+[[confirmed_experience]]
+id = "cicd_monitoring"
+text = "настраивал логирование и мониторинг, собирал CI/CD для выкладки"
+tags = ["backend", "automation"]
+source = "— Настраивал логирование и мониторинг, собирал пайплайны CI/CD для выкладки"
+
+[[confirmed_experience]]
+id = "integrations_monitoring"
+text = "делал фоновую обработку платежей с логированием и алертами"
+tags = ["backend", "automation"]
+source = "— Делал фоновую обработку платежей с логированием и алертами"
+
+[[confirmed_experience]]
+id = "api_optimization"
+text = "ускорил медленные эндпоинты API и выкладку обновлений"
+tags = ["backend"]
+source = "— Ускорил медленные эндпоинты API и сократил время выкладки обновлений"
+
+[[confirmed_experience]]
+id = "testing"
+text = "тесты на Pytest, Docker"
+tags = ["backend", "parsing", "automation"]
+source = "Scrapy BeautifulSoup Redis Kafka Docker Pytest Linux Ubuntu Server Git CI/CD"
+
+[[confirmed_experience]]
+id = "django"
+text = "пишу на Django и DRF"
+tags = ["backend"]
+source = "Навыки Python FastAPI Flask Django Django Rest Framework SQL PostgreSQL SQLAlchemy"
+
+[[confirmed_experience]]
+id = "scraping_tools"
+text = "знаком со Scrapy, BeautifulSoup и SQLAlchemy"
+tags = ["parsing"]
+source = "Scrapy BeautifulSoup Redis Kafka Docker Pytest Linux Ubuntu Server Git CI/CD"
+
+[[confirmed_experience]]
+id = "linux_docker"
+text = "администрирую Ubuntu Server, работал с Redis"
+tags = ["backend", "telegram", "automation"]
+source = "Scrapy BeautifulSoup Redis Kafka Docker Pytest Linux Ubuntu Server Git CI/CD"
+
+[[confirmed_experience]]
+id = "llm_in_development"
+text = "использую LLM-ассистентов в разработке: код, поиск ошибок, рутина"
+tags = ["ai_agents", "automation"]
+source = "— Использовал LLM-ассистентов для генерации кода, поиска ошибок и автоматизации рутины"
+
+[[confirmed_experience]]
+id = "course"
+text = "прошёл онлайн-курс «Python-разработчик» (2024)"
+tags = ["backend"]
+source = "2024 Онлайн-курс «Python-разработчик»"
+
+[[confirmed_experience]]
+id = "business_operations"
+text = "понимаю бизнес-процессы изнутри: 2 года вёл операционные процессы интернет-магазина (заказы, поставщики, остатки)"
+tags = ["automation"]
+source = "— Вёл операционные процессы: заказы, поставщики, остатки, отчёты"

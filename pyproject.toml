@@ -1,0 +1,39 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "freelance-bot"
+version = "1.0.0"
+description = "Персональный Telegram-бот: свежие заказы FL.ru и Kwork под профиль и черновики откликов"
+requires-python = ">=3.11"
+dependencies = [
+    "python-telegram-bot[job-queue]~=21.0",
+    "httpx>=0.27",
+    "python-dotenv>=1.0",
+    "defusedxml>=0.7",
+    "anthropic>=0.40",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+]
+
+[tool.setuptools.packages.find]
+include = ["freelance_bot*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+asyncio_default_fixture_loop_scope = "function"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+extend-exclude = [".autopilot"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]

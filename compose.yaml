@@ -1,0 +1,32 @@
+# Свой проект и своя сеть Compose, портов наружу нет (Telegram — long polling, исходящие
+# запросы), Caddy и чужие сети не трогаются. Лимиты — с запасом к фактическим ~100 МБ.
+name: freelance-bot
+
+services:
+  bot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: freelance-bot:latest
+    container_name: freelance-bot
+    restart: unless-stopped
+    env_file: .env  # TELEGRAM_BOT_TOKEN, TELEGRAM_OWNER_ID, ключи и модели нейросетей
+    volumes:
+      - ./data:/app/data  # SQLite: дедупликация, статусы, история откликов
+    mem_limit: 256m
+    memswap_limit: 256m
+    cpus: 0.5
+    pids_limit: 128
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "python", "deploy/healthcheck.py"]
+      interval: 5m
+      timeout: 10s
+      retries: 3
+      start_period: 5m
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

@@ -1,0 +1,38 @@
+# Архитектура
+
+Один процесс: `python -m freelance_bot run` = long-polling бот + JobQueue по интервалам источников (ADR 0006). Секреты — только `.env` через `freelance_bot/config.py`. Время в БД — UTC ISO-8601, показ и «сегодня» для лимитов — Europe/Moscow.
+
+## Поток данных
+
+`Source.fetch()` -> `Storage.upsert_project` (дедуп по platform+external_id; только новые идут дальше) -> bootstrap -> `scoring.score_project` -> отсечение -> `policy.decide_mode` -> `drafting` -> `Notifier` -> статусы и `responses`. Код цикла: `freelance_bot/pipeline.py` (`Pipeline.run_once`, `_run_source`, `_deliver`).
+
+- Bootstrap: при первом запуске площадки (флаг `bootstrapped:<platform>` пуст) проекты старше `general.max_age_hours` получают `filtered_out` с note `bootstrap` без уведомлений.
+- Отсечения (статус `filtered_out`, причина в note): не прошёл `min_score` или исключён (`excluded_reason`); FL без метки «для всех» при `only_free_responses` (note «платный отклик»).
+- Проходящие сортируются по баллу; `notify` — только карточка; `draft` — карточка + черновик; `auto` — `decide_mode` вызывается дважды (до и после генерации черновика: метки `[ЦЕНА]` и т.п. переводят в draft).
+- Сбой источника: `BlockedError` -> флаг `blocked_until:<platform>` (пауза BLOCK_PAUSE) и одно сообщение; прочие ошибки -> `fail_count`, одно сообщение на серию (FAILURES_BEFORE_ALERT). Цикл не падает.
+- Кнопки карточки (`applied:/skip:/redraft:/offer:<platform>:<id>`) обрабатывает `bot.py`; `redraft` -> `Pipeline.redraft` (счётчик варианта во флаге `variant:<p>:<id>`).
+- `/last` -> `Pipeline.offer_candidates`: проекты за `OFFER_WINDOW` (7 дней) без статусов applied/skipped/sent, балл считается на момент публикации (возраст и bootstrap не отсекают), платные FL — по `only_free_responses`.
+- Цена и срок: `offer` (кнопка или список `/last`) ставит флаг `awaiting_offer` = `<p>:<id>`; следующее текстовое сообщение владельца разбирает `bot.parse_offer`, `Pipeline.offer` берёт последний черновик (`Storage.latest_response`, нет — генерирует) и `drafting.fill_offer` подставляет значения. Ответ — текст в `<pre>` и URL-кнопка на проект; на биржу ничего не уходит, статус меняет только «Откликнулся».
+
+## Границы модулей
+
+- `models.py` — frozen-датаклассы `Project`, `ScoreResult`, `Draft`, `ModeDecision`; без ввода-вывода.
+- `config.py` — `load_settings(settings.toml, .env) -> Settings`; интервал источника < 60 с поднимается до 60; `ConfigError`.
+- `http.py` — `Fetcher` (таймаут, ретраи, пауза между запросами к домену, Retry-After), `looks_blocked`; ошибки `SourceError` > `TemporarySourceError`, `BlockedError`.
+- `sources/` — `fl.py` (`parse_fl_rss`, `FlSource`), `kwork.py` (`parse_kwork_projects`, `KworkSource`); парсеры — чистые функции; неожиданная структура -> `SourceFormatError`.
+- `textmatch.py` — `find_terms`, единственный способ сопоставлять ключевые слова (scoring и исключения).
+- `scoring.py` — балл 0..100: направления, пересечения, свежесть, бюджет, offers_count, штраф за требования к исполнителю; `extract_client_requirements`. Веса — константы в файле.
+- `storage.py` — SQLite (`projects`, `responses`, `flags`, `events`), миграции через `PRAGMA user_version`; флаги: `paused`, `last_ok:`, `last_error:`, `blocked_until:`, `bootstrapped:`, `fail_count:`, `variant:`, `awaiting_offer`, `summary:`.
+- `profile.py` + `profile/profile.toml` — подтверждённые факты (`Fact.source` — дословная строка резюме), `forbidden_claims`; контакты по умолчанию не попадают в отклики.
+- `summary.py` — суть заказа для карточки и `/last`: `LlmSummarizer` (Claude, effort low) или `builtin_summary` (первые предложения); `CachedSummarizer` кэширует удачную суть во флаге `summary:<p>:<id>`, запасную — нет.
+- `drafting.py` — `BuiltinDrafter` (шаблоны), `LlmDrafter` (Anthropic, необязателен, при сбое или нарушении откат на builtin), `validate_draft`, `similarity` (порог 0.6 против `recent_drafts`).
+- `policy.py` — `decide_mode`; `SENDERS` пуст.
+- `telegram_ui.py` — форматирование HTML-карточек без сети; `bot.py` — хэндлеры с фильтром владельца, `TelegramNotifier`; `__main__.py` — CLI и `RedactingFormatter`.
+
+## Соглашения
+
+- Тесты не ходят в сеть: `Fetcher(transport=httpx.MockTransport)`, фикстуры `tests/fixtures/`, `Storage(":memory:")`, время инъектируется (`score_project(..., now=)`, `clock=`).
+- Только публичные GET и официальный RSS; без логина, обхода CAPTCHA, скрытых API; ничего не покупает и не тратит коннекты сверх `kwork.connects_daily_limit` (0).
+- Автоотправка (`auto`) возможна только если одновременно: есть `Sender` с `official_confirmed`, отклик бесплатный, заданы `offer.price_rub` и `offer.days`, `daily_auto_limit` > 0 и не исчерпан, для Kwork — лимит коннектов, не dry-run. Иначе `effective=draft` с причинами. Сейчас `SENDERS` пуст, поэтому всегда draft (ADR 0001).
+- Тексты для пользователя — по-русски. Зависимости менять нельзя без решения пользователя.
+- Решения и причины: `docs/adr/`; термины: `CONTEXT.md`; проверка площадок: `docs/platforms.md`.

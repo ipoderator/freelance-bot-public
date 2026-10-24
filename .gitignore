@@ -1,0 +1,21 @@
+.env
+.env.*
+!.env.example
+node_modules/
+__pycache__/
+.DS_Store
+.venv/
+*.pyc
+.pytest_cache/
+data/*.sqlite3
+data/*.db
+profile/resume.pdf
+.autopilot/serve.*
+*.egg-info/
+logs/
+# Инструменты разработки: граф кода пересобирается `make graph`, отчёты strix — локальные
+graphify-out/
+strix_runs/
+# Мастер init: прежние settings.toml/profile.toml/.env и временные файлы записи
+*.bak
+*.tmp

@@ -1,0 +1,10 @@
+# В образ попадает только то, что копирует Dockerfile; остальное — не отправлять демону.
+*
+!Dockerfile
+!pyproject.toml
+!settings.toml
+!freelance_bot/
+!profile/profile.toml
+!deploy/constraints.txt
+!deploy/healthcheck.py
+**/__pycache__

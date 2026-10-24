@@ -268,3 +268,59 @@ def test_general_directions_select_active_and_skip_their_intersections(tmp_path:
     path.write_text(text.replace('["backend"]', '["frontend"]'))
     with pytest.raises(ConfigError, match="general.directions: неизвестное направление frontend"):
         load_settings(path, tmp_path / "no.env")
+
+
+def test_work24_operations_default_and_validation(tmp_path: Path) -> None:
+    path = write_settings(tmp_path)
+    base = path.read_text("utf-8")
+    s = load_settings(path, env_file=tmp_path / "none.env")
+    assert s.sources["work24"].enabled is False  # раздела нет — выключен
+    assert s.sources["work24"].interval_sec == 600
+
+    path.write_text(base + "\n[sources.work24]\nenabled = true\n", "utf-8")
+    s = load_settings(path, env_file=tmp_path / "none.env")
+    assert s.sources["work24"].enabled and s.sources["work24"].operations == ["listItOrders"]
+
+    both = '\n[sources.work24]\noperations = ["listOrders", "listItOrders", "listOrders"]\n'
+    path.write_text(base + both, "utf-8")
+    s = load_settings(path, env_file=tmp_path / "none.env")
+    assert s.sources["work24"].operations == ["listOrders", "listItOrders"]
+
+    for bad in ('["getOrder"]', "[]", '"listOrders"'):
+        path.write_text(base + f"\n[sources.work24]\noperations = {bad}\n", "utf-8")
+        with pytest.raises(ConfigError, match="sources.work24.operations"):
+            load_settings(path, env_file=tmp_path / "none.env")
+    path.write_text(base.replace("[sources.kwork]", '[sources.kwork]\noperations = ["x"]'), "utf-8")
+    with pytest.raises(ConfigError, match="только для sources.work24"):
+        load_settings(path, env_file=tmp_path / "none.env")
+
+
+def test_hh_chat_default_validation_and_telegram_keys(tmp_path: Path) -> None:
+    path = write_settings(tmp_path)
+    base = path.read_text("utf-8")
+    s = load_settings(path, env_file=tmp_path / "none.env")
+    assert s.sources["hh"].enabled is False and s.sources["hh"].chat == "hh_rabota_bot"
+    assert s.hh_tg_api_id is s.hh_tg_session is None
+
+    path.write_text(base + '\n[sources.hh]\nmode = "notify"\nchat = "@other_bot"\n', "utf-8")
+    s = load_settings(path, env_file=tmp_path / "none.env")
+    assert (s.sources["hh"].enabled, s.sources["hh"].mode) == (True, "notify")
+    assert s.sources["hh"].chat == "other_bot"
+    for bad in ('"https://t.me/x"', '"a b"', "1"):
+        path.write_text(base + f"\n[sources.hh]\nchat = {bad}\n", "utf-8")
+        with pytest.raises(ConfigError, match="sources.hh.chat"):
+            load_settings(path, env_file=tmp_path / "none.env")
+    path.write_text(base.replace("[sources.kwork]", '[sources.kwork]\nchat = "x_bot"'), "utf-8")
+    with pytest.raises(ConfigError, match="только для sources.hh"):
+        load_settings(path, env_file=tmp_path / "none.env")
+
+    path.write_text(base, "utf-8")
+    session = "1BVtsOK4Bu-not-a-real-session-string"
+    env = write_env(
+        tmp_path, HH_TG_API_ID="12345", HH_TG_API_HASH="hashhash", HH_TG_SESSION=session
+    )
+    s = load_settings(path, env_file=env)
+    assert (s.hh_tg_api_id, s.hh_tg_api_hash, s.hh_tg_session) == (12345, "hashhash", session)
+    assert session not in repr(s) and "hashhash" not in repr(s)
+    with pytest.raises(ConfigError, match="HH_TG_API_ID"):
+        load_settings(path, env_file=write_env(tmp_path, HH_TG_API_ID="abc"))

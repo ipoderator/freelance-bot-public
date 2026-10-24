@@ -21,6 +21,7 @@ from freelance_bot.telegram_ui import (
     format_stats,
     format_status,
     offer_list_keyboard,
+    selection_reason,
 )
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -253,3 +254,27 @@ def test_list_marks_today_and_yesterday_by_moscow_date(make_project):
     p = make_project(published_at=datetime(2026, 10, 24, 21, 10, tzinfo=UTC))
     out = format_offer_list([(p, 50)], tz, now=now)
     assert "свежие сверху" in out and "сегодня 00:10" in out
+
+
+def test_selection_reason_names_directions_and_terms() -> None:
+    r = _result(
+        directions=["telegram", "backend", "own"],
+        reasons=[
+            "Направление «telegram»: telegram, бот для",
+            "Направление «backend»: python",
+            "Бюджет: 5 000 ₽",
+        ],
+    )
+    assert selection_reason(r) == (
+        "Telegram-боты (telegram, бот для); backend на Python и API (python); own"
+    )
+    long = _result(directions=["backend"], reasons=["Направление «backend»: " + "api, " * 60])
+    assert selection_reason(long).endswith("…") and len(selection_reason(long)) <= 120
+
+
+def test_offer_list_shows_reason_and_work24_offer_has_tips(make_project) -> None:
+    p = make_project(platform="work24", url="https://work24.ru/order/1-bot")
+    out = format_offer_list([(p, 70)], "Europe/Moscow", reasons=["Telegram-боты (бот для)"])
+    assert "🎯 Telegram-боты (бот для)" in out and "Work24" in out
+    offer = format_offer(p, Draft("Текст", "llm", False, False), [], 5000, 3)
+    assert "штрафует на 500 ₽" in offer

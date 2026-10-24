@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "freelance-bot"
 version = "1.0.0"
-description = "Персональный Telegram-бот: свежие заказы FL.ru и Kwork под профиль и черновики откликов"
+description = "Персональный Telegram-бот: свежие заказы FL.ru, Kwork, Work24 и вакансии HH.ru под профиль, черновики откликов"
 requires-python = ">=3.11"
 dependencies = [
     "python-telegram-bot[job-queue]~=21.0",
@@ -13,9 +13,13 @@ dependencies = [
     "python-dotenv>=1.0",
     "defusedxml>=0.7",
     "anthropic>=0.40",
+    # вакансии HH: сессия пользователя Telegram читает уведомления бота hh.ru (ADR 0009)
+    "telethon~=1.45",
 ]
 
 [project.optional-dependencies]
+# QR-код в терминале для `python -m freelance_bot hh-login` (на сервере не нужен)
+login = ["qrcode~=8.2"]
 dev = [
     "pytest>=8",
     "pytest-asyncio>=0.23",
@@ -24,6 +28,10 @@ dev = [
 
 [tool.setuptools.packages.find]
 include = ["freelance_bot*"]
+
+[tool.setuptools.package-data]
+# операции API Anything для Work24 (freelance_bot/sources/work24.py)
+"freelance_bot.sources" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

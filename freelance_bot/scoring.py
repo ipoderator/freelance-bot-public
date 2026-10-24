@@ -36,6 +36,14 @@ except ImportError:  # pragma: no cover - зависит от состояния
         return found
 
 
+# Названия направлений из settings.toml для людей и нейросети; своё направление — по ключу
+DIRECTION_LABELS: dict[str, str] = {
+    "backend": "backend на Python и API",
+    "telegram": "Telegram-боты",
+    "ai_agents": "AI-агенты и LLM",
+    "automation": "автоматизация и интеграции",
+    "parsing": "парсинг и сбор данных",
+}
 RELEVANCE_MAX = 30.0  # лучшее направление
 RELEVANCE_REST_MAX = 10.0  # остальные направления вместе
 POINTS_FOR_FULL_STRENGTH = 4  # очки: слово в заголовке = 2, в описании = 1

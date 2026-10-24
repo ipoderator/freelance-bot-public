@@ -154,3 +154,24 @@ def test_llm_error_shows_api_message_but_not_network_text():
 
     assert llm_error(ApiError()) == "ApiError: Your credit balance is too low"
     assert llm_error(ConnectionError("https://api/?key=secret")) == "ConnectionError"
+
+
+async def test_llm_summary_sees_section_and_truncation(settings, make_project):
+    client = fake_client(reply("Бот записи клиентов."))
+    p = make_project(category="Мессенджеры / Telegram", description="Нужен бот записи...")
+    await LlmSummarizer(settings, client).summarize(p)
+    call = client.messages.calls[0]
+    brief = call["messages"][0]["content"]
+    assert "Раздел: Мессенджеры / Telegram" in brief and "Описание обрезано" in brief
+    assert "не додумывай" in call["system"]
+
+
+async def test_vacancy_summary_is_beginning_of_description_without_llm(settings, make_project):
+    storage = Storage(":memory:")
+    llm = LlmSummarizer(settings, client=fake_client(reply("не должно понадобиться")))
+    cached = CachedSummarizer(llm, storage)
+    v = make_project(platform="hh", external_id="t1", description="Обязанности: backend. Ещё.")
+
+    assert await cached.summarize(v) == "Обязанности: backend. Ещё."
+    assert llm._client.messages.calls == [] and storage.get_flag("summary:hh:t1") is None
+    storage.close()

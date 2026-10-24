@@ -18,7 +18,8 @@ from typing import Any, Protocol
 from freelance_bot.config import Settings
 from freelance_bot.models import Draft, Project, ScoreResult
 from freelance_bot.profile import Fact, Profile
-from freelance_bot.scoring import experience_limit
+from freelance_bot.scoring import DIRECTION_LABELS, experience_limit
+from freelance_bot.telegram_ui import PLATFORM_NAMES
 from freelance_bot.textmatch import find_terms
 
 log = logging.getLogger(__name__)
@@ -43,6 +44,9 @@ LLM_MAX_TOKENS = 16000
 # Отклонённый валидатором текст модель один раз исправляет по замечаниям, потом — встроенный
 LLM_FIX_ATTEMPTS = 1
 LLM_TIMEOUT_SEC = 120.0
+# ТЗ длиннее — середина вырезается: с промптом и max_tokens 4096 запрос должен влезть в 8K
+# токенов в минуту бесплатного Groq, иначе он отклонён целиком и пишет встроенный генератор
+BRIEF_MAX_CHARS = 6000
 
 
 class LlmUnavailable(Exception):
@@ -1052,6 +1056,72 @@ class BuiltinDrafter:
 
 # ── LLM ──────────────────────────────────────────────────────────────────────
 
+_TRUNCATED_RE = re.compile(r"(?:\.\.\.|…)\s*$")
+TRUNCATED_NOTE = (
+    "Описание обрезано площадкой: в ленте FL.ru только начало ТЗ. Не додумывай остальное."
+)
+
+
+def is_truncated(p: Project) -> bool:
+    """RSS FL отдаёт начало ТЗ с «...» в конце (docs/platforms.md, §1.2)."""
+    return p.platform == "fl" and bool(_TRUNCATED_RE.search(p.description))
+
+
+def _clip_brief(text: str, limit: int = BRIEF_MAX_CHARS) -> str:
+    """Начало и конец длинного ТЗ: в конце заказчики часто пишут требования к отклику."""
+    if len(text) <= limit:
+        return text
+    head, tail = text[: limit * 2 // 3].rstrip(), text[-(limit // 3) :].lstrip()
+    return f"{head}\n(… середина описания пропущена …)\n{tail}"
+
+
+def brief_block(p: Project) -> str:
+    """Заказ для нейросети: заголовок, раздел биржи, описание; обрезанное — с пометкой."""
+    lines = [f"Заголовок: {p.title}"]
+    if p.category and not p.category.isdigit():  # у Kwork category — номер рубрики
+        lines.append(f"Раздел: {p.category}")
+    lines.append(f"Описание: {_clip_brief(p.description.strip()) or '(нет)'}")
+    note = f"\n{TRUNCATED_NOTE}" if is_truncated(p) else ""
+    return "<brief>\n" + "\n".join(lines) + "\n</brief>" + note
+
+
+def _order_facts(p: Project) -> str:
+    """Условия заказа вне ТЗ: площадка, бюджет, срок и отклики, статистика заказчика."""
+    terms = [f"бюджет заказчика {_budget(p) or 'не указан'}"]
+    if p.deadline_days:
+        terms.append(f"срок заказчика {_fmt_days(p.deadline_days)}")
+    if p.offers_count is not None:
+        terms.append(f"откликов уже {p.offers_count}")
+    hired = p.extra.get("hired_percent")
+    if hired is not None:
+        terms.append(f"заказчик нанимает в {hired}% своих проектов")
+    return f"Площадка: {PLATFORM_NAMES.get(p.platform, p.platform)}. Условия: {'; '.join(terms)}."
+
+
+NEAR_FACTS = 5
+_STEM_WORD_RE = re.compile(r"[a-zа-яё0-9]+")
+# Слова, которые есть почти в любом факте и ТЗ, — ничего не говорят о близости
+_STEM_STOP = frozenset({"работ", "через", "котор", "нужен", "нужно", "делал", "также", "задач"})
+
+
+def _stems(text: str) -> set[str]:
+    """Грубые основы: первые 5 букв слова («интеграции», «интеграцией» → «интег»)."""
+    words = _STEM_WORD_RE.findall(text.lower().replace("ё", "е"))
+    return {w[:5] for w in words if len(w) >= 3} - _STEM_STOP
+
+
+def rank_facts(facts: list[Fact], p: Project, r: ScoreResult) -> list[Fact]:
+    """Ближе к заказу — выше: общие с ТЗ основы слов, затем совпавшие направления;
+    при равенстве — порядок профиля."""
+    brief = _stems(f"{p.title} {p.description} {' '.join(r.matched_terms)}")
+    directions = set(r.directions)
+
+    def key(fact: Fact) -> tuple[int, int]:
+        return len(_stems(fact.text) & brief), len(set(fact.tags) & directions)
+
+    return sorted(facts, key=key, reverse=True)
+
+
 _SYSTEM_PROMPT = """\
 Ты пишешь отклик на фриланс-заказ от имени разработчика по имени {name}. Пиши по-русски, \
 от первого лица, как живой специалист пишет заказчику: 500–900 знаков, конкретно, без \
@@ -1079,6 +1149,9 @@ _SYSTEM_PROMPT = """\
 - Никаких контактов, телефонов, email, @ников, ссылок, фамилии, отчества, города, возраста.
 - Цену и срок не придумывай — только из входных данных.
 - Если упомянут бюджет заказчика, можно сослаться на него.
+- Опирайся на раздел биржи и условия заказа (срок, число откликов): они уточняют, что за \
+задача. Если описание обрезано или в нём не хватает главного для оценки — вопрос задай \
+именно об этом, а недостающее не додумывай.
 - Выполни требования заказчика к отклику из блока <client_requirements> и ответь на каждый \
 пункт. Чего для ответа нет в данных — не придумывай, а ставь метку: [ПРИМЕРЫ РАБОТ — впиши], \
 [ДАТА СТАРТА — впиши], [ЧАСОВ В НЕДЕЛЮ — впиши], [ПОДТВЕРДИ ДОСТУПНОСТЬ — впиши]. \
@@ -1124,7 +1197,8 @@ _FIX_PROMPT = """\
 """
 
 
-# Что площадка требует от текста отклика (docs/platforms.md, БЗ FL 62056, FAQ Kwork 442).
+# Что площадка требует от текста отклика (docs/platforms.md: БЗ FL 62056, FAQ Kwork 442,
+# оферта Work24 п. 1.3).
 PLATFORM_RULES: dict[str, str] = {
     "fl": (
         "FL.ru: отклик персональный, не шаблонный, до 5000 символов; ответь на вопросы из ТЗ "
@@ -1134,6 +1208,10 @@ PLATFORM_RULES: dict[str, str] = {
     "kwork": (
         "Kwork: никаких контактов, ссылок и предложений связаться или заплатить вне Kwork — "
         "за обмен контактами площадка обнуляет коннекты; общение и оплата только через Kwork."
+    ),
+    "work24": (
+        "Work24: никаких контактов (телефон, email, мессенджеры, соцсети) и ссылок — за них "
+        "штраф 500 ₽ (оферта, п. 1.3); общение и оплата только через сайт."
     ),
 }
 
@@ -1277,8 +1355,22 @@ class LlmDrafter:
         text = tidy_llm_text("".join(parts), self.profile.name)
         return text or None
 
+    def _facts_block(self, p: Project, r: ScoreResult) -> str:
+        """Факты опыта: сначала до NEAR_FACTS ближайших к заказу — модели проще взять 2–3
+        подходящих, а не первые по списку (rank_facts)."""
+        ranked = rank_facts(self.profile.confirmed_experience, p, r)
+        head = "Подтверждённый опыт (единственный источник фактов)"
+        near, rest = ranked[:NEAR_FACTS], ranked[NEAR_FACTS:]
+        if not near or not rest:
+            return f"{head}:\n" + "\n".join(f"- {f.text}" for f in ranked)
+        return (
+            f"{head}. Ближе всего к этой задаче:\n"
+            + "\n".join(f"- {f.text}" for f in near)
+            + "\nОстальное:\n"
+            + "\n".join(f"- {f.text}" for f in rest)
+        )
+
     def _prompt(self, p: Project, r: ScoreResult, variant: int) -> str:
-        facts = "\n".join(f"- {f.text}" for f in self.profile.confirmed_experience)
         targets = "\n".join(f"- {t}" for t in self.profile.target_directions)
         price = (
             _fmt_rub(self.settings.offer_price_rub)
@@ -1291,7 +1383,7 @@ class LlmDrafter:
             else DEADLINE_PLACEHOLDER
         )
         requirements = "\n".join(f"- {q}" for q in r.client_requirements) or "- нет"
-        budget = _budget(p) or "не указан"
+        directions = ", ".join(DIRECTION_LABELS.get(d, d) for d in r.directions) or "нет"
         previous = (
             self.storage.latest_response(p.platform, p.external_id)
             if variant and self.storage
@@ -1305,14 +1397,14 @@ class LlmDrafter:
         if previous:
             style += f"\n<previous_draft>\n{previous[0]}\n</previous_draft>"
         return (
-            f"<brief>\nЗаголовок: {p.title}\nОписание: {p.description}\n</brief>\n"
-            f"Площадка: {p.platform}. Бюджет заказчика: {budget}.\n"
+            f"{brief_block(p)}\n"
+            f"{_order_facts(p)}\n"
             f"Правила площадки: {PLATFORM_RULES.get(p.platform, 'нет')}\n"
-            f"Совпавшие направления: {', '.join(r.directions) or 'нет'}; "
+            f"Совпавшие направления: {directions}; "
             f"ключевые слова: {', '.join(r.matched_terms) or 'нет'}.\n"
             f"<client_requirements>\n{requirements}\n</client_requirements>\n"
             f"{_requirement_lines(r.client_requirements)}"
-            f"Подтверждённый опыт (единственный источник фактов):\n{facts}\n"
+            f"{self._facts_block(p, r)}\n"
             f"Направления, где беру заказы (НЕ опыт):\n{targets}\n"
             f"Цена: {price}. Срок: {days}.{style}"
         )

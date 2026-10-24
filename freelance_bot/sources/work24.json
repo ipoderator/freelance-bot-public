@@ -1,0 +1,203 @@
+{
+  "name": "work24",
+  "baseUrl": "https://work24.ru",
+  "operations": [
+    {
+      "name": "listItOrders",
+      "description": "Список заказов категории Разработка и IT на Work24 по странице",
+      "request": {
+        "method": "GET",
+        "url": "https://api.work24.ru/orders?my_disciplines=false&discipline_group_ids[]=2&page=%7Bpage%7D&showHiddenOrders=false",
+        "headers": {
+          "accept": "application/json, text/plain, */*",
+          "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+          "origin": "https://work24.ru",
+          "priority": "u=1, i",
+          "referer": "https://work24.ru/",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"macOS\"",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-site",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "x-client-type": "desktop_web"
+        }
+      },
+      "slots": [
+        {
+          "param": "page",
+          "at": [
+            "query:page"
+          ]
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "https://work24.ru/orders/razrabotka-i-it?page={page}"
+      },
+      "match": {
+        "method": "GET",
+        "host": "api.work24.ru",
+        "path": "/orders"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json; charset=UTF-8",
+        "extract": "orders",
+        "pick": [
+          "id",
+          "slug=url",
+          "title=topic",
+          "created_at",
+          "deadline=finished_at",
+          "price",
+          "category=discipline",
+          "offersCount",
+          "status"
+        ]
+      },
+      "params": [
+        {
+          "name": "page",
+          "type": "string",
+          "required": true,
+          "example": "2"
+        }
+      ],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "getOrder",
+      "description": "Публичная карточка заказа Work24 с полным описанием",
+      "request": {
+        "method": "GET",
+        "url": "https://work24.ru/order/%7Bslug%7D",
+        "headers": {
+          "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/jxl,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7",
+          "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+          "priority": "u=0, i",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"macOS\"",
+          "sec-fetch-dest": "document",
+          "sec-fetch-mode": "navigate",
+          "sec-fetch-site": "none",
+          "sec-fetch-user": "?1",
+          "upgrade-insecure-requests": "1",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36"
+        }
+      },
+      "slots": [
+        {
+          "param": "slug",
+          "at": [
+            "path:1"
+          ]
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "https://work24.ru/order/{slug}"
+      },
+      "match": {
+        "method": "GET",
+        "host": "work24.ru",
+        "path": "/order/*"
+      },
+      "response": {
+        "format": "html",
+        "contentType": "text/html;charset=utf-8",
+        "html": {
+          "items": "body",
+          "fields": {
+            "title": "h1",
+            "description": ".order__description .order-text__text",
+            "status": ".order-head__feature_status .order-status__text"
+          }
+        }
+      },
+      "params": [
+        {
+          "name": "slug",
+          "type": "string",
+          "required": true,
+          "example": "35325-ust-i-nast-probrosagpu-passthrough-i-razdelenie-gpu"
+        }
+      ],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    },
+    {
+      "name": "listOrders",
+      "description": "Общая лента заказов Work24 по странице для последующей проверки релевантности",
+      "request": {
+        "method": "GET",
+        "url": "https://api.work24.ru/orders?my_disciplines=false&page=%7Bpage%7D&showHiddenOrders=false",
+        "headers": {
+          "accept": "application/json, text/plain, */*",
+          "accept-language": "ru-RU,ru;q=0.9,en-US;q=0.8,en;q=0.7",
+          "origin": "https://work24.ru",
+          "priority": "u=1, i",
+          "referer": "https://work24.ru/",
+          "sec-ch-ua": "\"Google Chrome\";v=\"155\", \"Chromium\";v=\"155\", \"Not(A:Brand\";v=\"24\"",
+          "sec-ch-ua-mobile": "?0",
+          "sec-ch-ua-platform": "\"macOS\"",
+          "sec-fetch-dest": "empty",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-site",
+          "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/155.0.0.0 Safari/537.36",
+          "x-client-type": "desktop_web"
+        }
+      },
+      "slots": [
+        {
+          "param": "page",
+          "at": [
+            "query:page"
+          ]
+        }
+      ],
+      "volatile": [],
+      "trigger": {
+        "url": "https://work24.ru/orders?page={page}"
+      },
+      "match": {
+        "method": "GET",
+        "host": "api.work24.ru",
+        "path": "/orders"
+      },
+      "response": {
+        "format": "json",
+        "contentType": "application/json; charset=UTF-8",
+        "extract": "orders",
+        "pick": [
+          "id",
+          "slug=url",
+          "title=topic",
+          "created_at",
+          "deadline=finished_at",
+          "price",
+          "category=discipline",
+          "group=disciplineGroup",
+          "offersCount",
+          "status"
+        ]
+      },
+      "params": [
+        {
+          "name": "page",
+          "type": "string",
+          "required": true,
+          "example": "2"
+        }
+      ],
+      "readOnly": true,
+      "minTier": 1,
+      "learnedLoggedIn": false
+    }
+  ]
+}

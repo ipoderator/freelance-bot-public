@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Iterator
 from contextlib import contextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,7 @@ from freelance_bot import bot as bot_module
 ROOT = Path(__file__).resolve().parent.parent
 FAKE_TOKEN = "123456:ABCdefFAKEtokenNOTreal_0123456789"
 REJECTED = f"The token `{FAKE_TOKEN}` was rejected by the server."
+NOW_HH = datetime(2026, 10, 24, 18, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -121,3 +123,48 @@ def test_run_without_token_hint_names_the_readme_command(tmp_path, capsys):
     out = capsys.readouterr().out
     assert code != 0
     assert command in out
+
+
+def test_hh_login_writes_session_to_env_and_never_prints_it(tmp_path, capsys, monkeypatch):
+    from freelance_bot.sources import hh
+
+    session = "1BVtsOK4Bu-FAKE-SESSION-not-real"
+    env = tmp_path / ".env"
+    env.write_text("TELEGRAM_OWNER_ID=42\nHH_TG_API_ID=111\nHH_TG_API_HASH=hhhash\n")
+    seen = {}
+
+    async def fake_login(api_id, api_hash, ask, secret, *, by_code, chat):
+        seen.update(api_id=api_id, api_hash=api_hash, by_code=by_code, chat=chat)
+        n = hh.Notice(1, NOW_HH, "1. Python-разработчик\n📍 Москва. 👉 Ромашка\n"
+                      "Откликнуться на сайте: https://my.hh.ru/b/x1")  # fmt: skip
+        return session, [n]
+
+    monkeypatch.setattr(hh, "login", fake_login)
+    code = cli.main(cli_args(tmp_path, env, "hh-login", "--code"))
+
+    out = capsys.readouterr().out
+    assert code == 0
+    assert seen == {"api_id": 111, "api_hash": "hhhash", "by_code": True, "chat": "hh_rabota_bot"}
+    assert session not in out and "hhhash" not in out
+    assert "вакансий в них: 1" in out and "Python-разработчик — Ромашка" in out
+    assert f"HH_TG_SESSION={session}" in env.read_text()
+    assert "TELEGRAM_OWNER_ID=42" in env.read_text()  # прочее не тронуто
+    assert env.stat().st_mode & 0o777 == 0o600
+    assert (tmp_path / ".env.bak").stat().st_mode & 0o777 == 0o600
+
+
+def test_hh_login_failure_writes_nothing_and_hides_details(tmp_path, capsys, monkeypatch):
+    from freelance_bot.sources import hh
+
+    env = tmp_path / ".env"
+    env.write_text("HH_TG_API_ID=111\nHH_TG_API_HASH=hhhash\n")
+
+    async def failing_login(*args, **kwargs):
+        raise RuntimeError("phone +79990000000 is banned")
+
+    monkeypatch.setattr(hh, "login", failing_login)
+    code = cli.main(cli_args(tmp_path, env, "hh-login"))
+
+    out = capsys.readouterr().out
+    assert code == 1 and "RuntimeError" in out and "+7999" not in out
+    assert "HH_TG_SESSION" not in env.read_text()

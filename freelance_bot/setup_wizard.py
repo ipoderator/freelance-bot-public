@@ -389,6 +389,11 @@ def render_env(existing: str, a: Answers) -> str:
         "OPENAI_API_KEY": a.openai_key,
         "ANTHROPIC_API_KEY": a.anthropic_key,
     }
+    return set_env_values(existing, values)
+
+
+def set_env_values(existing: str, values: dict[str, str]) -> str:
+    """Заменить или дописать ключи `values`; остальные строки — как были."""
     lines, seen = [], set()
     for line in existing.splitlines():
         key = line.split("=", 1)[0].strip()
@@ -408,6 +413,19 @@ def _backup(path: Path) -> Path | None:
     shutil.copy2(path, backup)
     if path.name == ".env":
         os.chmod(backup, 0o600)
+    return backup
+
+
+def update_env_file(path: Path, values: dict[str, str]) -> Path | None:
+    """Записать ключи в .env (права 600, прежний — .env.bak). Возвращает путь копии."""
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    backup = _backup(path)
+    tmp = path.with_name(path.name + ".tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        fh.write(set_env_values(existing, values))
+    os.chmod(tmp, 0o600)
+    tmp.replace(path)
     return backup
 
 

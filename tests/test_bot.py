@@ -683,7 +683,7 @@ def test_once_dry_run_console_without_token(tmp_path, capsys, monkeypatch, make_
                 extra={"for_all": True},  # бесплатный отклик — платные отсекаются
             )]
 
-    monkeypatch.setattr(cli, "build_sources", lambda settings, platform, include_disabled: [Src()])
+    monkeypatch.setattr(cli, "build_sources", lambda *args, **kwargs: [Src()])
     db = tmp_path / "t.sqlite3"
     code = cli.main([
         "--env-file", str(tmp_path / "none.env"), "--settings", str(ROOT / "settings.toml"),
@@ -702,11 +702,30 @@ def test_disabled_kwork_runs_only_with_include_disabled(capsys):
     from dataclasses import replace
 
     settings = load_settings(ROOT / "settings.toml", ROOT / "no-such.env")
-    off = replace(settings.sources["kwork"], enabled=False)
-    settings = replace(settings, sources={**settings.sources, "kwork": off})
-    assert cli.enabled_platforms(settings, None, include_disabled=False) == ["fl"]
+    on = {name: replace(settings.sources[name], enabled=True) for name in ("fl", "work24")}
+    off = {name: replace(settings.sources[name], enabled=False) for name in ("kwork", "hh")}
+    settings = replace(settings, sources={**settings.sources, **on, **off})
+    assert cli.enabled_platforms(settings, None, include_disabled=False) == ["fl", "work24"]
     assert cli.enabled_platforms(settings, "kwork", include_disabled=True) == ["kwork"]
     assert cli.enabled_platforms(settings, "kwork", include_disabled=False) == []
+
+
+def test_work24_source_skips_orders_already_in_storage(make_project):
+    from dataclasses import replace
+
+    from freelance_bot.sources.work24 import Work24Source
+
+    settings = load_settings(ROOT / "settings.toml", ROOT / "no-such.env")
+    w24 = replace(settings.sources["work24"], enabled=True, operations=["listItOrders"])
+    settings = replace(settings, sources={**settings.sources, "work24": w24})
+    storage = Storage(":memory:")
+    storage.upsert_project(make_project(platform="work24", external_id="35325"))
+    (source,) = cli.build_sources(settings, "work24", False, storage)
+    assert isinstance(source, Work24Source)
+    assert source._known("35325") and not source._known("1")
+    (fresh,) = cli.build_sources(settings, "work24", False)  # без базы — всё новое
+    assert not fresh._known("35325")
+    storage.close()
 
 
 # ── launchd ──────────────────────────────────────────────────────────────────
@@ -729,3 +748,53 @@ def test_install_script_renders_valid_plist_without_touching_launchctl():
 @pytest.mark.parametrize("name", ["install_launchd.sh", "uninstall_launchd.sh"])
 def test_launchd_scripts_are_valid_bash(name):
     subprocess.run(["bash", "-n", str(ROOT / "scripts" / name)], check=True)
+
+
+def _vacancy(make_project, env):
+    from freelance_bot.scoring import score_project
+
+    v = make_project(
+        platform="hh", external_id="t1", url="https://my.hh.ru/b/test001",
+        title="Python-разработчик (FastAPI)", description="Обязанности: backend на FastAPI.",
+        budget_max=None, offers_count=None, category="Вакансия HH.ru",
+        extra={"kind": "vacancy", "company": "Ромашка", "area": "Москва",
+               "salary": "от 150 000 ₽"},
+    )  # fmt: skip
+    env.storage.upsert_project(v)
+    env.storage.save_score("hh", "t1", score_project(v, env.settings, NOW))
+    return v
+
+
+async def test_pick_vacancy_sends_card_with_link_and_no_draft(env, make_project):
+    _vacancy(make_project, env)
+    update, message, query = update_from(OWNER, "pick:hh:t1")
+
+    await env.handlers.button(update, None)
+
+    reply = message.replies[0]
+    assert reply.startswith("💼 <b>Python-разработчик (FastAPI)</b>\n🏢 Ромашка · 📍 Москва")
+    assert "💵 зарплата: от 150 000 ₽" in reply and "Отклик на вакансию — на hh.ru" in reply
+    rows = message.markups[0].inline_keyboard
+    assert rows[0][0].url == "https://my.hh.ru/b/test001"
+    assert [b.callback_data for b in rows[1]] == ["applied:hh:t1", "skip:hh:t1"]
+    assert env.storage.latest_response("hh", "t1") is None  # черновик не создавался
+
+    for action in ("offer", "redraft"):
+        update, message, query = update_from(OWNER, f"{action}:hh:t1")
+        await env.handlers.button(update, None)
+        assert "отклики не готовит" in query.answers[0] and message.replies == []
+    assert env.storage.get_flag(AWAITING_OFFER_FLAG) in (None, "")
+
+
+async def test_last_lists_vacancy_with_company_and_salary(env, make_project):
+    _vacancy(make_project, env)
+    update, message, _ = update_from(OWNER)
+
+    await env.handlers.last(update, None)
+
+    text = "\n".join(message.replies)
+    assert "Python-разработчик (FastAPI)" in text
+    assert "🏢 Ромашка · 📍 Москва · 💵 от 150 000 ₽" in text
+    update, message, _ = update_from(OWNER, "applied:hh:t1")
+    await env.handlers.button(update, None)
+    assert "Вакансия убрана из /last" in message.replies[0]

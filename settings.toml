@@ -89,6 +89,36 @@ urls = [
     "https://kwork.ru/projects?c=11",
 ]
 
+[sources.work24]
+# Work24 — готовые операции API Anything (freelance_bot/sources/work24.json, docs/platforms.md,
+# §3): лента — JSON api.work24.ru, полное описание — публичная карточка заказа. Включён по
+# просьбе пользователя 2026-10-24. api.work24.ru закрыт в robots.txt (Disallow: /), оферта
+# автосбор прямо не запрещает (ADR 0008). Отклики на площадке бот не отправляет.
+enabled = true
+interval_sec = 600
+jitter_sec = 60
+mode = "draft"
+daily_auto_limit = 0
+# Ленты: "listItOrders" — раздел «Разработка и IT»; "listOrders" — все разделы (там в основном
+# отзывы, дизайн и тексты — лишние запросы карточек). Карточка открывается один раз и только
+# для нового открытого заказа моложе general.max_age_hours.
+operations = ["listItOrders"]
+
+[sources.hh]
+# HH.ru — вакансии из уведомлений автопоиска, которые бот hh.ru (@hh_rabota_bot, «Хэдди»)
+# присылает вам в Telegram (ADR 0009, docs/platforms.md, §4). Сайт и API hh.ru бот не трогает:
+# анонимный API закрыт (403), условия сайта запрещают автосбор (п. 6.1.38). Ваша сессия
+# Telegram (`python -m freelance_bot hh-login`, ключи HH_TG_* в .env) читает только этот чат и
+# ничего не отправляет. Откликов на вакансии бот не готовит и не отправляет.
+# Включён по решению пользователя 2026-10-24 («Хэдди в Telegram»).
+enabled = true
+interval_sec = 600
+jitter_sec = 60
+# notify — только карточка: черновик и цена со сроком для вакансий не нужны
+mode = "notify"
+daily_auto_limit = 0
+chat = "hh_rabota_bot"
+
 [kwork]
 # Сколько коннектов Kwork бот может потратить за сутки. 0 — ни одного:
 # автоотклики на Kwork не отправляются. Покупка коннектов/PRO ботом не делается никогда.

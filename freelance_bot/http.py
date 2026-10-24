@@ -66,6 +66,7 @@ _TITLE_RE = re.compile(r"<title[^>]*>(.*?)</title>", re.IGNORECASE | re.DOTALL)
 _SCRIPT_STYLE_RE = re.compile(r"<(script|style)\b[^>]*>.*?</\1\s*>", re.IGNORECASE | re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]*>")
 _FEED_PREFIXES = ("<?xml", "<rss", "<feed")
+_JSON_PREFIXES = ("{", "[")
 
 
 class SourceError(Exception):
@@ -84,11 +85,16 @@ class BlockedError(SourceError):
     """Площадка показала CAPTCHA/403/блок-страницу. Не обходим и не повторяем."""
 
 
-def looks_blocked(status: int, text: str) -> bool:
+def looks_blocked(status: int, text: str, expect: str | None = None) -> bool:
+    """`expect` — разметка обычной страницы (класс поля с данными): есть в ответе — это
+    данные. Нужна, когда в <title> текст заказа: «Парсер с обходом капчи» — не блокировка."""
     if status == 403:
         return True
-    if text.lstrip("\ufeff \t\r\n").lower().startswith(_FEED_PREFIXES):
-        # RSS/XML-лента — данные, а не страница блокировки, какие бы слова в ней ни были.
+    if text.lstrip("\ufeff \t\r\n").lower().startswith(_FEED_PREFIXES + _JSON_PREFIXES):
+        # RSS/XML-лента или JSON API — данные, а не страница блокировки, какие бы слова в них
+        # ни были.
+        return False
+    if expect is not None and expect in text:
         return False
     lowered = text.lower()
     if any(marker in lowered for marker in _STRUCTURAL_MARKERS):
@@ -160,19 +166,22 @@ class Fetcher:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def get_text(self, url: str) -> str:
+    async def get_text(
+        self, url: str, *, headers: dict[str, str] | None = None, expect: str | None = None
+    ) -> str:
+        """`headers` — дополнительные заголовки запроса; `expect` — см. looks_blocked."""
         host = httpx.URL(url).host
         for attempt in range(1, self._max_attempts + 1):
             retry_after: float | None = None
             try:
-                response = await self._polite_get(host, url)
+                response = await self._polite_get(host, url, headers)
             except (httpx.TimeoutException, httpx.TransportError) as exc:
                 problem = f"сетевая ошибка {type(exc).__name__}"
             except (httpx.TooManyRedirects, httpx.DecodingError) as exc:
                 raise SourceError(f"{host}: {type(exc).__name__} для {url}") from None
             else:
                 status, text = response.status_code, response.text
-                if looks_blocked(status, text):
+                if looks_blocked(status, text, expect):
                     raise BlockedError(f"{host}: похоже на блокировку/CAPTCHA (HTTP {status})")
                 if status == 429 or status >= 500:
                     problem = f"HTTP {status}"
@@ -205,7 +214,9 @@ class Fetcher:
             await self._sleep(delay)
         raise AssertionError("unreachable")  # pragma: no cover
 
-    async def _polite_get(self, host: str, url: str) -> httpx.Response:
+    async def _polite_get(
+        self, host: str, url: str, headers: dict[str, str] | None = None
+    ) -> httpx.Response:
         lock = self._host_locks.setdefault(host, asyncio.Lock())
         async with lock:
             last = self._last_request.get(host)
@@ -214,6 +225,6 @@ class Fetcher:
                 if wait > 0:
                     await self._sleep(wait)
             try:
-                return await self._client.get(url)
+                return await self._client.get(url, headers=headers)
             finally:
                 self._last_request[host] = self._clock()

@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import os
+import re
 import tomllib
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -21,7 +22,11 @@ MIN_DIGEST_INTERVAL_MIN = 15  # чаще — уже не дайджест, а п
 DEFAULT_LLM_MODEL = "claude-sonnet-5-5"
 DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
-DEFAULT_INTERVALS: dict[str, int] = {"fl": 180, "kwork": 300}
+DEFAULT_INTERVALS: dict[str, int] = {"fl": 180, "kwork": 300, "work24": 600, "hh": 600}
+# Ленты Work24 — имена операций из freelance_bot/sources/work24.json
+WORK24_FEEDS = ("listItOrders", "listOrders")
+# HH: чат бота hh.ru, который присылает уведомления автопоиска (freelance_bot/sources/hh.py)
+DEFAULT_HH_CHAT = "hh_rabota_bot"
 
 
 class ConfigError(Exception):
@@ -51,6 +56,10 @@ class SourceSettings:
     # Только FL: присылать лишь проекты с бесплатным откликом (метка «для всех»).
     # Остальные отклики FL платные (docs/platforms.md, §1). На Kwork не действует.
     only_free_responses: bool = True
+    # Только Work24: какие ленты читать (WORK24_FEEDS) — вместо urls
+    operations: list[str] = field(default_factory=list)
+    # Только HH: username бота hh.ru в Telegram, чьи уведомления читать — вместо urls
+    chat: str = ""
 
 
 @dataclass(frozen=True)
@@ -86,6 +95,10 @@ class Settings:
     digest_enabled: bool = False
     digest_start_hour: int = 11
     digest_interval_min: int = 60
+    # HH: сессия пользователя Telegram читает уведомления бота hh.ru (hh-login пишет все три)
+    hh_tg_api_id: int | None = None
+    hh_tg_api_hash: str | None = field(default=None, repr=False)
+    hh_tg_session: str | None = field(default=None, repr=False)
 
     @property
     def has_llm_key(self) -> bool:
@@ -116,6 +129,9 @@ def load_settings(path: Path = Path("settings.toml"), env_file: Path = Path(".en
         openai_model=env.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL,
         groq_api_key=env.get("GROQ_API_KEY"),
         groq_model=env.get("GROQ_MODEL") or DEFAULT_GROQ_MODEL,
+        hh_tg_api_id=_parse_api_id(env.get("HH_TG_API_ID")),
+        hh_tg_api_hash=env.get("HH_TG_API_HASH"),
+        hh_tg_session=env.get("HH_TG_SESSION"),
         db_path=Path(_str(storage, "db_path", "storage.db_path", "data/bot.sqlite3")),
         timezone=_str(general, "timezone", "general.timezone", "Europe/Moscow"),
         max_age_hours=_number(general, "max_age_hours", "general.max_age_hours", 6),
@@ -164,6 +180,7 @@ def _read_env(env_file: Path) -> dict[str, str | None]:
     names = (
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "ANTHROPIC_API_KEY", "LLM_MODEL",
         "OPENAI_API_KEY", "OPENAI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
+        "HH_TG_API_ID", "HH_TG_API_HASH", "HH_TG_SESSION",
     )  # fmt: skip
     result: dict[str, str | None] = {}
     for name in names:
@@ -186,6 +203,17 @@ def _parse_owner_id(value: str | None) -> int | None:
         ) from None
 
 
+def _parse_api_id(value: str | None) -> int | None:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except ValueError:
+        raise ConfigError(
+            "HH_TG_API_ID в .env должен быть числом (App api_id с my.telegram.org)"
+        ) from None
+
+
 # ── разделы ──────────────────────────────────────────────────────────────────
 
 
@@ -201,8 +229,9 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
         prefix = f"sources.{platform}"
         if platform not in raw:
             sources[platform] = SourceSettings(
-                enabled=False, interval_sec=DEFAULT_INTERVALS[platform], urls=[]
-            )
+                enabled=False, interval_sec=DEFAULT_INTERVALS[platform], urls=[],
+                chat=DEFAULT_HH_CHAT if platform == "hh" else "",
+            )  # fmt: skip
             continue
         table = _table(raw, platform, prefix)
         mode = table.get("mode", "draft")
@@ -223,6 +252,8 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
             raise ConfigError(
                 f"{prefix}.only_free_responses: настройка действует только для sources.fl"
             )
+        operations = _parse_operations(table, platform, prefix)
+        chat = _parse_chat(table, platform, prefix)
         sources[platform] = SourceSettings(
             enabled=_bool(table, "enabled", f"{prefix}.enabled", True),
             interval_sec=max(interval, MIN_INTERVAL_SEC),
@@ -231,8 +262,38 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
             daily_auto_limit=_int(table, "daily_auto_limit", f"{prefix}.daily_auto_limit", 0),
             jitter_sec=_int(table, "jitter_sec", f"{prefix}.jitter_sec", 0),
             only_free_responses=only_free,
+            operations=operations,
+            chat=chat,
         )
     return sources
+
+
+def _parse_operations(table: dict[str, Any], platform: str, prefix: str) -> list[str]:
+    if platform != "work24":
+        if "operations" in table:
+            raise ConfigError(f"{prefix}.operations: настройка действует только для sources.work24")
+        return []
+    operations = table.get("operations", [WORK24_FEEDS[0]])
+    if (
+        not isinstance(operations, list)
+        or not operations
+        or not all(op in WORK24_FEEDS for op in operations)
+    ):
+        raise ConfigError(f"{prefix}.operations: нужен список из {', '.join(WORK24_FEEDS)}")
+    return list(dict.fromkeys(operations))
+
+
+def _parse_chat(table: dict[str, Any], platform: str, prefix: str) -> str:
+    if platform != "hh":
+        if "chat" in table:
+            raise ConfigError(f"{prefix}.chat: настройка действует только для sources.hh")
+        return ""
+    chat = table.get("chat", DEFAULT_HH_CHAT)
+    if not isinstance(chat, str) or not re.fullmatch(r"@?[A-Za-z][A-Za-z0-9_]{3,31}", chat):
+        raise ConfigError(
+            f"{prefix}.chat: нужен username бота в Telegram, например {DEFAULT_HH_CHAT}"
+        )
+    return chat.lstrip("@")
 
 
 def _parse_directions(raw: dict[str, Any]) -> dict[str, Direction]:

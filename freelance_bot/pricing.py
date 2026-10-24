@@ -5,7 +5,7 @@
 - бюджет не ниже оценки — предлагаем бюджет: заказчик сам назвал сумму;
 - бюджет ниже — Kwork: не выше «допустимого» бюджета (possiblePriceLimit, выше площадка
   не даст), FL: нижняя граница вилки с пометкой «бюджет ниже оценки».
-Срок не длиннее срока заказчика на Kwork (max_days). Вилки — рынок FL/Kwork для
+Срок не длиннее срока заказчика (Kwork max_days, «Срок сдачи» Work24). Вилки — рынок FL/Kwork для
 разработчика с подтверждённым опытом ≈2 года (profile/profile.toml); правятся здесь.
 Чистая функция: без сети и случайности.
 """
@@ -161,7 +161,7 @@ def estimate(p: Project, r: ScoreResult, settings: Settings) -> Estimate:
         else:
             price = _round_price(max(budget, floor))
             notes.append("бюджет заказчика ниже оценки")
-    if p.platform == "kwork" and p.deadline_days and p.deadline_days < days:
+    if p.deadline_days and p.deadline_days < days:  # Kwork max_days, срок сдачи Work24
         days = p.deadline_days
         notes.append(f"срок заказчика {p.deadline_days} дн.")
     return Estimate(price_rub=price, days=max(1, days), basis="; ".join(notes), below_budget=below)

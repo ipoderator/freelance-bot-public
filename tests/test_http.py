@@ -247,6 +247,23 @@ def test_looks_blocked(status: int, text: str, expected: bool) -> None:
     assert looks_blocked(status, text) is expected
 
 
+def test_json_and_expected_markup_are_data_not_block_pages() -> None:
+    assert looks_blocked(200, '{"orders": [{"topic": "обойти captcha"}]}') is False
+    page = "<html><title>Нужен парсер, на сайте captcha</title><div class='order-text'>"
+    assert looks_blocked(200, page) is True
+    assert looks_blocked(200, page, expect="order-text") is False
+    assert looks_blocked(403, page, expect="order-text") is True
+
+
+async def test_extra_headers_are_sent_with_the_request() -> None:
+    ft, calls = FakeTime(), []
+    fetcher = make_fetcher(scripted([httpx.Response(200, text="{}")], calls), ft)
+    await fetcher.get_text("https://api.work24.ru/orders", headers={"x-client-type": "web"})
+    assert calls[0].headers["x-client-type"] == "web"
+    assert "freelance-bot/1.0" in calls[0].headers["user-agent"]
+    await fetcher.aclose()
+
+
 def test_real_kwork_listing_with_smartcaptcha_script_is_not_blocked() -> None:
     page = (FIXTURES / "http_kwork_normal.html").read_text("utf-8")
     assert "smartcaptcha.yandexcloud.net" in page and '"isYandexSmartCaptcha":true' in page

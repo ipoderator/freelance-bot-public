@@ -19,20 +19,21 @@
 - `models.py` — frozen-датаклассы `Project`, `ScoreResult`, `Draft`, `ModeDecision`; без ввода-вывода.
 - `config.py` — `load_settings(settings.toml, .env) -> Settings`; интервал источника < 60 с поднимается до 60; `ConfigError`.
 - `http.py` — `Fetcher` (таймаут, ретраи, пауза между запросами к домену, Retry-After), `looks_blocked`; ошибки `SourceError` > `TemporarySourceError`, `BlockedError`.
-- `sources/` — `fl.py` (`parse_fl_rss`, `FlSource`), `kwork.py` (`parse_kwork_projects`, `KworkSource`); парсеры — чистые функции; неожиданная структура -> `SourceFormatError`.
+- `sources/` — `fl.py` (`parse_fl_rss`, `FlSource`), `kwork.py` (`parse_kwork_projects`, `KworkSource`), `work24.py` (`Work24Source` исполняет операции API Anything из `work24.json`: `extract_json`, `extract_html` на CSS-селекторах; карточки только для новых ID — `known` из `Storage`), `hh.py` (`HhSource`: вакансии из чата пользователя с ботом HH @hh_rabota_bot; `TelethonReader` — сессия Telegram, только чтение; `parse_notice` разбирает подборку Хэдди; ключ — `vacancy_key`, ADR 0009); парсеры — чистые функции; неожиданная структура -> `SourceFormatError`.
 - `textmatch.py` — `find_terms`, единственный способ сопоставлять ключевые слова (scoring и исключения).
 - `scoring.py` — балл 0..100: направления, пересечения, свежесть, бюджет, offers_count, штраф за требования к исполнителю; `extract_client_requirements`. Веса — константы в файле.
 - `storage.py` — SQLite (`projects`, `responses`, `flags`, `events`), миграции через `PRAGMA user_version`; флаги: `paused`, `last_ok:`, `last_error:`, `blocked_until:`, `bootstrapped:`, `fail_count:`, `variant:`, `awaiting_offer`, `summary:`.
 - `profile.py` + `profile/profile.toml` — подтверждённые факты (`Fact.source` — дословная строка резюме), `forbidden_claims`; контакты по умолчанию не попадают в отклики.
 - `summary.py` — суть заказа для карточки и `/last`: `LlmSummarizer` (Claude, effort low) или `builtin_summary` (первые предложения); `CachedSummarizer` кэширует удачную суть во флаге `summary:<p>:<id>`, запасную — нет.
-- `drafting.py` — `BuiltinDrafter` (шаблоны), `LlmDrafter` (Anthropic, необязателен, при сбое или нарушении откат на builtin), `validate_draft`, `similarity` (порог 0.6 против `recent_drafts`).
+- `drafting.py` — `BuiltinDrafter` (шаблоны), `LlmDrafter` (Groq, GPT или Claude, необязателен, при сбое или нарушении откат на builtin), `validate_draft`, `similarity` (порог 0.6 против `recent_drafts`). Контекст заказа для нейросети — `brief_block` (заголовок, раздел, ТЗ; обрезанное RSS FL помечено, длиннее `BRIEF_MAX_CHARS` — начало и конец) и `_order_facts` (площадка, бюджет, срок, отклики); факты опыта — `rank_facts` (ближайшие к ТЗ сверху).
 - `policy.py` — `decide_mode`; `SENDERS` пуст.
+- Вакансии (`telegram_ui.VACANCY_PLATFORMS`, сейчас `hh`): карточка `format_vacancy_card` (компания, город, зарплата, время уведомления), кнопки только «Откликнулся»/«Пропустить», выбор в списке присылает карточку со ссылкой вместо черновика, суть — без LLM (`summary.BUILTIN_ONLY`).
 - `telegram_ui.py` — форматирование HTML-карточек без сети; `bot.py` — хэндлеры с фильтром владельца, `TelegramNotifier`; `__main__.py` — CLI и `RedactingFormatter`.
 
 ## Соглашения
 
 - Тесты не ходят в сеть: `Fetcher(transport=httpx.MockTransport)`, фикстуры `tests/fixtures/`, `Storage(":memory:")`, время инъектируется (`score_project(..., now=)`, `clock=`).
-- Только публичные GET и официальный RSS; без логина, обхода CAPTCHA, скрытых API; ничего не покупает и не тратит коннекты сверх `kwork.connects_daily_limit` (0).
+- Только публичные GET и официальный RSS; без логина, обхода CAPTCHA, скрытых API (исключение — ленты Work24 из `api.work24.ru` по просьбе пользователя, ADR 0008); вакансии HH — не с сайта, а из сообщений бота HH в Telegram пользователя, только чтение (ADR 0009); ничего не покупает и не тратит коннекты сверх `kwork.connects_daily_limit` (0).
 - Автоотправка (`auto`) возможна только если одновременно: есть `Sender` с `official_confirmed`, отклик бесплатный, заданы `offer.price_rub` и `offer.days`, `daily_auto_limit` > 0 и не исчерпан, для Kwork — лимит коннектов, не dry-run. Иначе `effective=draft` с причинами. Сейчас `SENDERS` пуст, поэтому всегда draft (ADR 0001).
 - Тексты для пользователя — по-русски. Зависимости менять нельзя без решения пользователя.
 - Решения и причины: `docs/adr/`; термины: `CONTEXT.md`; проверка площадок: `docs/platforms.md`.

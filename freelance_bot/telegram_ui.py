@@ -13,8 +13,11 @@ from zoneinfo import ZoneInfo
 from freelance_bot.config import Settings
 from freelance_bot.models import PLATFORMS, Draft, ModeDecision, Platform, Project, ScoreResult
 from freelance_bot.pricing import Estimate
+from freelance_bot.scoring import DIRECTION_LABELS
 
-PLATFORM_NAMES: dict[str, str] = {"fl": "FL.ru", "kwork": "Kwork"}
+PLATFORM_NAMES: dict[str, str] = {
+    "fl": "FL.ru", "kwork": "Kwork", "work24": "Work24", "hh": "HH.ru",
+}  # fmt: skip
 KWORK_TERMS_URL = "https://kwork.ru/terms_of_service"
 KWORK_WARNING = (
     "⚠ Kwork включён на ваш риск: пользовательское соглашение Kwork запрещает "
@@ -51,8 +54,17 @@ PLATFORM_TIPS: dict[str, tuple[str, ...]] = {
         "без контактов и ссылок в тексте: за обмен контактами Kwork обнуляет коннекты",
         "отклик тратит 1 коннект",
     ),
+    "work24": (
+        "без контактов и ссылок: за передачу контактов Work24 штрафует на 500 ₽ (оферта, п. 1.3)",
+        "общение и оплата — только через сайт",
+    ),
 }
+# Вакансии HH: отклик пользователь делает на hh.ru сам — без черновика, цены и срока
+VACANCY_PLATFORMS = frozenset({"hh"})
+VACANCY_NOTE = "Отклик на вакансию — на hh.ru, по ссылке: бот вакансиям отклики не готовит."
 ESTIMATE_MARK = "🧮"
+REASON_MARK = "🎯"
+REASON_MAX_CHARS = 120
 
 _STATS_LABELS: tuple[tuple[str, str, str], ...] = (
     ("collected", "🔎", "собрано"),
@@ -91,6 +103,22 @@ def fmt_when(moment: datetime, tz: str, now: datetime | None = None) -> str:
     return fmt_time(moment, tz)
 
 
+def is_vacancy(p: Project) -> bool:
+    return p.platform in VACANCY_PLATFORMS
+
+
+def _salary(p: Project) -> str:
+    return p.extra.get("salary") or "не указана"
+
+
+def _employer(p: Project) -> str:
+    """«🏢 Компания · 📍 Город» для вакансии."""
+    parts = [f"🏢 {esc(p.extra.get('company') or 'компания не указана')}"]
+    if p.extra.get("area"):
+        parts.append(f"📍 {esc(p.extra['area'])}")
+    return " · ".join(parts)
+
+
 def _budget(p: Project) -> str:
     lo, hi = p.budget_min, p.budget_max
     if lo is not None and hi is not None and lo != hi:
@@ -107,6 +135,20 @@ def _days(days: int) -> str:
     return f"{days} дней"
 
 
+def selection_reason(r: ScoreResult) -> str:
+    """Почему заказ отобран, одной строкой для списка: направления и совпавшие слова."""
+    parts = []
+    for direction in r.directions:
+        label = DIRECTION_LABELS.get(direction, direction)
+        prefix = f"Направление «{direction}»: "
+        terms = next((x[len(prefix) :] for x in r.reasons if x.startswith(prefix)), "")
+        parts.append(f"{label} ({terms})" if terms else label)
+    text = "; ".join(parts) or ", ".join(r.matched_terms)
+    if len(text) > REASON_MAX_CHARS:
+        text = text[: REASON_MAX_CHARS - 1].rsplit(" ", 1)[0].rstrip(",;( ") + "…"
+    return text
+
+
 def format_estimate(e: Estimate) -> str:
     value = f"{fmt_rub(e.price_rub)} ₽ · {_days(e.days)}"
     return f"{ESTIMATE_MARK} Оценка: <b>{value}</b> — {esc(e.basis)}"
@@ -120,6 +162,8 @@ def format_card(
     summary: str = "",
     estimate: Estimate | None = None,
 ) -> str:
+    if is_vacancy(p):
+        return format_vacancy_card(p, r, tz, summary)
     offers = "нет данных" if p.offers_count is None else str(p.offers_count)
     lines = [f"🆕 <b>{esc(p.title)}</b>"]
     if summary:
@@ -142,6 +186,23 @@ def format_card(
     return "\n".join(lines)
 
 
+def format_vacancy_card(p: Project, r: ScoreResult | None, tz: str, summary: str = "") -> str:
+    """Вакансия HH: компания, город, зарплата, когда пришло уведомление, почему подходит."""
+    site = esc(PLATFORM_NAMES.get(p.platform, p.platform))
+    lines = [f"💼 <b>{esc(p.title)}</b>", _employer(p)]
+    if summary:
+        lines.append(f"{SUMMARY_MARK} {esc(summary)}")
+    lines.append(f"🌐 {site} · 🕐 уведомление от {esc(fmt_time(p.published_at, tz))}")
+    lines.append(f"💵 зарплата: {esc(_salary(p))}")
+    if r is not None:
+        lines.append(f"⭐ Score: <b>{r.score}</b>/100")
+        if r.reasons:
+            lines.append("<b>Почему подходит:</b>")
+            lines.extend(f"• {esc(reason)}" for reason in r.reasons)
+    lines.append(f'🔗 <a href="{html.escape(p.url, quote=True)}">Открыть вакансию</a>')
+    return "\n".join(lines)
+
+
 def format_draft(d: Draft, estimated: bool = False) -> str:
     notes = []
     if estimated:
@@ -157,6 +218,13 @@ def format_draft(d: Draft, estimated: bool = False) -> str:
 
 
 def card_keyboard(platform: Platform | str, external_id: str) -> list[list[tuple[str, str]]]:
+    if platform in VACANCY_PLATFORMS:  # без «Цена и срок» и «Другой вариант»: отклик на hh.ru
+        return [
+            [
+                (BUTTON_APPLIED, f"applied:{platform}:{external_id}"),
+                (BUTTON_SKIP, f"skip:{platform}:{external_id}"),
+            ]
+        ]
     return [
         [
             (BUTTON_APPLIED, f"applied:{platform}:{external_id}"),
@@ -177,8 +245,10 @@ def format_offer_list(
     start: int = 1,
     now: datetime | None = None,
     title: str = LIST_TITLE,
+    reasons: Sequence[str] | None = None,
 ) -> str:
-    """Список заказов с номерами от `start`; заголовок — только у первой части."""
+    """Список заказов с номерами от `start`; заголовок — только у первой части.
+    `reasons` — почему отобран каждый заказ (selection_reason)."""
     if not items:
         return (
             "За последнюю неделю подходящих заказов, на которые вы ещё не откликнулись, нет. "
@@ -199,6 +269,13 @@ def format_offer_list(
         if score is not None:
             when.append(f"⭐ {score}")
         lines.append(" · ".join(when))
+        if is_vacancy(p):
+            lines.append(f"{_employer(p)} · 💵 {esc(_salary(p))}")
+            reason = reasons[index] if reasons else ""
+            if reason:
+                lines.append(f"{REASON_MARK} {esc(reason)}")
+            lines.append("")
+            continue
         money = [f"💵 {esc(_budget(p))}"]
         if estimates:
             guess = estimates[index]
@@ -206,13 +283,16 @@ def format_offer_list(
         if p.platform == "fl" and not p.extra.get("for_all"):
             money.append("💰 платный отклик")
         lines.append(" · ".join(money))
+        reason = reasons[index] if reasons else ""
+        if reason:
+            lines.append(f"{REASON_MARK} {esc(reason)}")
         lines.append("")
     return "\n".join(lines).rstrip()
 
 
 def format_start(next_digest: str | None) -> str:
     lines = [
-        "👋 <b>Привет!</b> Я ищу заказы на FL.ru и Kwork под ваш профиль "
+        "👋 <b>Привет!</b> Я ищу заказы на FL.ru, Kwork и Work24 под ваш профиль "
         "и готовлю отклики.",
         "",
         f"{MENU_NEW} — заказы, которых вы ещё не видели",
@@ -260,9 +340,10 @@ def format_offer_hint() -> str:
 
 def format_applied(p: Project) -> str:
     site = PLATFORM_NAMES.get(p.platform, p.platform)
+    what = "Вакансия убрана" if is_vacancy(p) else "Заказ убран"
     return (
         f"✅ Записал: вы откликнулись на «{esc(p.title)}» ({esc(site)}). "
-        "Заказ убран из /last, отклик учтён в /stats."
+        f"{what} из /last, отклик учтён в /stats."
     )
 
 

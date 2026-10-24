@@ -103,3 +103,11 @@ def test_deterministic(make_project, settings):
     a = guess(make_project, settings, title="AI-агент для поддержки с REST API")
     b = guess(make_project, settings, title="AI-агент для поддержки с REST API")
     assert a == b
+
+
+def test_work24_deadline_limits_days(make_project, settings):
+    e = guess(
+        make_project, settings, platform="work24", title="Создать телеграмм БОТА",
+        deadline_days=2,
+    )
+    assert e.days == 2 and "срок заказчика 2 дн." in e.basis

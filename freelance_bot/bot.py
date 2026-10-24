@@ -45,6 +45,7 @@ from freelance_bot.telegram_ui import (
     BUTTON_CANCEL,
     BUTTON_OFFER,
     BUTTON_REDRAFT,
+    BUTTON_SKIP,
     DIGEST_TITLE,
     MENU_ALL,
     MENU_NEW,
@@ -52,6 +53,8 @@ from freelance_bot.telegram_ui import (
     MENU_STATS,
     MENU_STATUS,
     PLATFORM_NAMES,
+    VACANCY_NOTE,
+    VACANCY_PLATFORMS,
     format_applied,
     format_filters,
     format_offer,
@@ -61,7 +64,9 @@ from freelance_bot.telegram_ui import (
     format_start,
     format_stats,
     format_status,
+    format_vacancy_card,
     offer_list_keyboard,
+    selection_reason,
 )
 
 log = logging.getLogger(__name__)
@@ -224,14 +229,16 @@ def list_pages(
     tz: str,
     now: datetime,
     title: str | None = None,
+    reasons: list[str] | None = None,
 ) -> list[tuple[str, Keyboard]]:
     """Список заказов по сообщениям: в каждом сколько влезет без обрыва, нумерация сквозная."""
     extra = {"title": title} if title else {}
 
     def page(lo: int, hi: int) -> str:
         return format_offer_list(
-            items[lo:hi], tz, summaries[lo:hi], guesses[lo:hi], lo + 1, now, **extra
-        )
+            items[lo:hi], tz, summaries[lo:hi], guesses[lo:hi], lo + 1, now, **extra,
+            reasons=reasons[lo:hi] if reasons else None,
+        )  # fmt: skip
 
     pages, lo = [], 0
     while lo < len(items):
@@ -375,7 +382,10 @@ class BotHandlers:
         shown = ",".join(f"{p.platform}:{p.external_id}" for p, _ in items)
         self.storage.set_flag(LAST_LIST_FLAG, shown)
         now = datetime.now(UTC)
-        return list_pages(items, summaries, guesses, self.settings.timezone, now, title)
+        reasons = [selection_reason(r) for _, r in candidates]
+        return list_pages(
+            items, summaries, guesses, self.settings.timezone, now, title, reasons
+        )
 
     async def text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Обычное сообщение владельца: номер заказа из /last или цена и срок для выбранного."""
@@ -420,14 +430,45 @@ class BotHandlers:
         await self._respond(update.effective_message, platform, external_id)
 
     async def _respond(self, message: Any, platform: str, external_id: str) -> None:
-        """Готовый отклик на выбранный заказ — сразу, без вопроса о цене."""
+        """Готовый отклик на выбранный заказ — сразу, без вопроса о цене. Вакансия — её
+        карточка со ссылкой: отклик пользователь делает на hh.ru сам."""
         self.storage.set_flag(AWAITING_OFFER_FLAG, "")
+        if platform in VACANCY_PLATFORMS:
+            await self._send_vacancy(message, platform, external_id)
+            return
         async with _typing(message):
             ready = await self.pipeline.response(platform, external_id)
         if ready is None:
             await message.reply_text("Заказ не найден в базе. Выберите другой: /last")
             return
         await self._send_offer(message, ready)
+
+    async def _send_vacancy(self, message: Any, platform: str, external_id: str) -> None:
+        p = self.storage.get_project(platform, external_id)
+        if p is None:
+            await message.reply_text("Вакансия не найдена в базе. Выберите другую: /last")
+            return
+        summary = await self.pipeline.summarizer.summarize(p)
+        key = f"{platform}:{external_id}"
+        markup = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(f"🔗 Открыть вакансию на {PLATFORM_NAMES[platform]}",
+                                      url=p.url)],  # fmt: skip
+                [
+                    InlineKeyboardButton(BUTTON_APPLIED, callback_data=f"applied:{key}"),
+                    InlineKeyboardButton(BUTTON_SKIP, callback_data=f"skip:{key}"),
+                ],
+            ]
+        )
+        text = format_vacancy_card(
+            p, self.storage.get_score(platform, external_id), self.settings.timezone, summary
+        )
+        await message.reply_text(
+            f"{text}\n\n{VACANCY_NOTE}",
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
 
     async def _send_offer(self, message: Any, ready: Offer) -> None:
         p = ready.project
@@ -501,8 +542,10 @@ class BotHandlers:
         if p is None:
             return await query.answer("Проект не найден в базе", show_alert=True)
 
+        if platform in VACANCY_PLATFORMS and action in ("offer", "redraft"):
+            return await query.answer(VACANCY_NOTE, show_alert=True)
         if action == "pick":
-            await query.answer("Готовлю отклик…")
+            await query.answer("Готовлю отклик…" if platform not in VACANCY_PLATFORMS else None)
             await self._respond(query.message, platform, external_id)
             return
         if action == "offer":

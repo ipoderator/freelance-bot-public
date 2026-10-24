@@ -15,11 +15,16 @@ import pytest
 
 from freelance_bot.config import DEFAULT_LLM_MODEL, Settings, load_settings
 from freelance_bot.drafting import (
+    BRIEF_MAX_CHARS,
+    TRUNCATED_NOTE,
     BuiltinDrafter,
     LlmDrafter,
     LlmUnavailable,
+    brief_block,
     fill_offer,
+    is_truncated,
     make_drafter,
+    rank_facts,
     remaining_placeholders,
     similarity,
     tidy_llm_text,
@@ -880,3 +885,52 @@ def test_fill_offer_appends_missing_price_and_days():
         "1 ₽ 1 день", "1 ₽ 5 дней", "1 ₽ 11 дней", "1 ₽ 21 день", "1 ₽ 22 дня", "1 ₽ 112 дней",
     ]
     assert remaining_placeholders("[A] и [A], [B]") == ["[A]", "[B]"]
+
+
+# ── контекст заказа для нейросети ────────────────────────────────────────────
+
+
+def test_brief_has_section_and_marks_truncated_fl_description(make_project) -> None:
+    cut = make_project(description="Нужен бот для записи. Подробнее...", category="AI / Боты")
+    brief = brief_block(cut)
+    assert brief.startswith("<brief>\nЗаголовок: Telegram-бот на Python\nРаздел: AI / Боты\n")
+    assert brief.endswith(f"</brief>\n{TRUNCATED_NOTE}") and is_truncated(cut)
+    whole = make_project(platform="kwork", description="Текст...", category="41")
+    assert "Раздел" not in brief_block(whole)  # у Kwork в category — номер рубрики
+    assert not is_truncated(whole)  # обрезает только RSS FL
+
+
+def test_long_brief_keeps_beginning_and_end(make_project) -> None:
+    text = "Начало ТЗ. " + "середина " * 2000 + "В отклике напишите слово «кит»."
+    brief = brief_block(make_project(description=text))
+    assert len(brief) < BRIEF_MAX_CHARS + 300
+    assert "Начало ТЗ." in brief and "слово «кит»." in brief
+    assert "(… середина описания пропущена …)" in brief
+
+
+def test_facts_closest_to_the_order_go_first(profile: Profile, make_project) -> None:
+    p = make_project(title="Парсер цен", description="Собрать цены через Scrapy в базу")
+    ranked = rank_facts(profile.confirmed_experience, p, score(["parsing"], ["парсер"]))
+    assert "Scrapy" in ranked[0].text
+
+
+async def test_llm_prompt_carries_order_conditions_and_ranked_facts(
+    profile: Profile, llm_settings: Settings, make_project
+) -> None:
+    p = make_project(
+        platform="work24", title="Бот записи в Google Таблицу", category="Разработка и IT / Боты",
+        description="Бот на Python пишет запись клиента в таблицу.", budget_max=5000,
+        offers_count=2, deadline_days=7,
+    )
+    client = fake_client(reply(GOOD_LLM_TEXT))
+    await LlmDrafter(profile, llm_settings, client).generate(p, TG_SCORE)
+    prompt = client.beta.messages.calls[0]["messages"][0]["content"]
+    assert "Раздел: Разработка и IT / Боты" in prompt
+    assert (
+        "Площадка: Work24. Условия: бюджет заказчика до 5 000 ₽; срок заказчика 7 дней; "
+        "откликов уже 2." in prompt
+    )
+    assert "Совпавшие направления: Telegram-боты, backend на Python и API;" in prompt
+    assert "штраф 500 ₽" in prompt  # правила Work24
+    assert "Ближе всего к этой задаче:\n" in prompt and "\nОстальное:\n" in prompt
+    assert "раздел биржи и условия заказа" in client.beta.messages.calls[0]["system"]

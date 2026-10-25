@@ -115,7 +115,7 @@ def parse_post(
     title = _fix_latin(lines[0])
     salary_line = lines[1] if _head(lines[1]) not in SECTIONS else ""
     body = [_without_contacts(_fix_latin(line)) for line in lines[1 + bool(salary_line):]]
-    description = "\n".join(line for line in body if re.search(r"\w", line))
+    description = _sections([line for line in body if re.search(r"\w", line)])
     budget_min, budget_max, salary = _salary(salary_line)
     digest = hashlib.sha1(f"{title.casefold()}\n{description.casefold()}".encode()).hexdigest()
     return Project(
@@ -129,8 +129,32 @@ def parse_post(
         budget_max=budget_max,
         offers_count=None,
         category=CATEGORY,
-        extra={k: v for k, v in {"area": city, "salary": salary}.items() if v},
+        extra={k: v for k, v in {"area": city, "salary": salary, "channel": channel}.items() if v},
     )
+
+
+def _sections(lines: list[str]) -> str:
+    """«Обязанности:» и пункты «• …» под ним → «Обязанности: первое; второе.» — одной
+    строкой, как у других вакансий: суть карточки читается, а не «• • •»."""
+    out: list[str] = []
+    items: list[str] = []
+    head = ""
+
+    def flush() -> None:
+        text = "; ".join(i.rstrip(".;,") for i in items)
+        if head:
+            out.append(f"{head}: {text}." if text else f"{head}:")
+        elif text:
+            out.append(text)
+
+    for line in lines:
+        if _head(line):
+            flush()
+            head, items = line.rstrip(":").strip(), []
+        else:
+            items.append(line.lstrip("•·-–— ").strip())
+    flush()
+    return "\n".join(out)
 
 
 def _lines(markup: str) -> list[str]:
@@ -162,8 +186,9 @@ def _salary(line: str) -> tuple[int | None, int | None, str]:
         return None, None, ""
     amounts = [int(re.sub(r"\s", "", m)) for m in _MONEY_RE.findall(line)] if "₽" in line else []
     amounts = [a for a in amounts if a >= 1000][:2]
-    if not amounts:
-        return None, None, line.rstrip(".")
+    if not amounts:  # «Зарплата по договоренности.» — в карточке и так «зарплата: …»
+        text = re.sub(r"^зарплата\s*", "", line.rstrip("."), flags=re.I)
+        return None, None, text.replace("договоренности", "договорённости")
     lo, hi = min(amounts), max(amounts)
 
     def num(v: int) -> str:

@@ -342,6 +342,7 @@ async def test_pipeline_sends_vacancy_cards_once_without_drafts() -> None:
     assert "Почему подходит:" in text and "claude" in text
     assert 'href="https://my.hh.ru/b/test005"' in text
     assert [b[1] for row in keyboard for b in row] == [
+        f"letter:hh:{vacancy_key('Специалист по контент-ферме', 'Натури Фарм', 'Москва')}",
         f"applied:hh:{vacancy_key('Специалист по контент-ферме', 'Натури Фарм', 'Москва')}",
         f"skip:hh:{vacancy_key('Специалист по контент-ферме', 'Натури Фарм', 'Москва')}",
         f"nofit:hh:{vacancy_key('Специалист по контент-ферме', 'Натури Фарм', 'Москва')}",

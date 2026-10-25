@@ -321,4 +321,80 @@ def test_lessons_rebuilt_for_skill_and_experience_keep_rules(tmp_path: Path) -> 
     assert len({x.id for x in storage.lessons(7)}) == 4
     storage.close()
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS) == 4
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+
+
+def test_lessons_get_resume_scope_and_old_rules_keep_working(tmp_path: Path) -> None:
+    """Миграция 5: правила, записанные после прохождения анкеты, — для её профессии; более
+    ранние и у разработчика — '' (profile.toml); при смене резюме чужие не действуют."""
+    import json
+
+    from freelance_bot.storage import MIGRATIONS
+
+    db = tmp_path / "v4.sqlite3"
+    with sqlite3.connect(db) as conn:
+        for script in MIGRATIONS[:4]:
+            conn.executescript(script)
+        conn.execute("PRAGMA user_version = 4")
+        anketa = {"profile": {"profession": " Продавец-консультант "}, "directions": []}
+        dev = {"profile": {"profession": "Python-разработчик"}, "directions": ["backend"]}
+        rows = [(7, json.dumps(anketa, ensure_ascii=False), "2026-10-20T00:00:00+00:00"),
+                (8, json.dumps(dev, ensure_ascii=False), "2026-10-20T00:00:00+00:00")]
+        conn.executemany(
+            "INSERT INTO users (tg_id, step, data, created_at, updated_at, completed_at) "
+            "VALUES (?, 'done', ?, 'a', 'b', ?)", rows,
+        )  # fmt: skip
+        lessons = [(7, "company", "роза хутор", "2026-10-19T00:00:00+00:00"),  # до анкеты
+                   (7, "company", "пятерочка", "2026-10-21T00:00:00+00:00"),  # после
+                   (8, "topic", "java", "2026-10-21T00:00:00+00:00"),  # разработчик
+                   (9, "topic", "php", "2026-10-21T00:00:00+00:00")]  # без анкеты
+        conn.executemany(
+            "INSERT INTO lessons (tg_id, kind, value, weight, created_at, updated_at) "
+            "VALUES (?, ?, ?, 0, ?, ?)", [(*x, x[3]) for x in lessons],
+        )  # fmt: skip
+    storage = Storage(db)
+    assert [x.value for x in storage.lessons(7, "Продавец-консультант")] == ["пятерочка"]
+    assert [x.value for x in storage.lessons(7)] == ["роза хутор"]
+    assert [x.value for x in storage.lessons(8)] == ["java"]
+    assert [x.value for x in storage.lessons(9)] == ["php"]
+    assert storage.lesson_scopes(7) == {"": 1, "Продавец-консультант": 1}
+    # одно правило у двух резюме — разные строки
+    storage.save_lesson(7, "company", "пятерочка", 0, "Кассир", scope="")
+    assert len(storage.lessons(7)) == 2 and len(storage.lessons(7, "Продавец-консультант")) == 1
+    assert storage.clear_lessons(7, "Продавец-консультант") == 1 and storage.lessons(7)
+    storage.close()
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+
+
+def test_user_marks_per_person_and_forget(storage: Storage, make_project) -> None:
+    """Отметки под списком — у каждого свои; «показано» не затирает «откликнулся»; вакансия
+    хранится целиком (живой поиск в projects не пишется); /forget удаляет."""
+    p = make_project(platform="superjob", external_id="5", title="Повар",
+                     extra={"area": "Воронеж", "company": "Кафе"})  # fmt: skip
+    storage.save_user(7, "done", {"full_name": "Иванов Иван"}, consent=True, completed=True)
+    storage.mark_shown(7, [p])
+    storage.mark_shown(8, [p])
+    assert storage.marked_project(7, "superjob", "5") == p
+    assert storage.get_project("superjob", "5") is None  # сбор владельца не тронут
+    assert storage.set_mark(7, "superjob", "5", "applied") is True
+    assert storage.set_mark(7, "superjob", "404", "applied") is False  # не из его списка
+    storage.mark_shown(7, [p])  # показали снова — отметка осталась
+    assert storage.closed_marks(7) == {("superjob", "5")} and storage.closed_marks(8) == set()
+    with pytest.raises(ValueError):
+        storage.set_mark(7, "superjob", "5", "sent")
+    storage.save_lesson(7, "company", "кафе", 0, "Повар", scope="Повар")
+    assert storage.delete_user(7) is True
+    assert storage.marked_project(7, "superjob", "5") is None
+    assert storage.lesson_scopes(7) == {} and storage.marked_project(8, "superjob", "5") == p
+
+
+def test_old_shown_marks_are_dropped(make_project) -> None:
+    clock = [datetime(2026, 10, 1, tzinfo=UTC)]
+    storage = Storage(":memory:", clock=lambda: clock[0])
+    old, fresh = (make_project(platform="superjob", external_id=i) for i in ("1", "2"))
+    storage.mark_shown(7, [old])
+    clock[0] += timedelta(days=31)
+    storage.mark_shown(7, [fresh])
+    assert storage.marked_project(7, "superjob", "1") is None
+    assert storage.marked_project(7, "superjob", "2") is not None

@@ -18,10 +18,13 @@ from freelance_bot.http import BlockedError, SourceError
 from freelance_bot.matching import (
     completed_anketa,
     drop_repeats,
+    group_chains,
+    lesson_scope,
     outside_anketa,
+    rank,
     user_settings,
 )
-from freelance_bot.models import Draft, Platform, Project, ScoreResult
+from freelance_bot.models import Draft, Lesson, Platform, Project, ScoreResult
 from freelance_bot.policy import SENDERS, Sender, decide_mode
 from freelance_bot.pricing import Estimate, estimate
 from freelance_bot.scoring import score_project
@@ -42,6 +45,7 @@ FAILURES_BEFORE_ALERT = 3
 BLOCK_PAUSE = timedelta(hours=1)  # история 8: «пауза (1 час)»
 PAID_NOTE = "платный отклик"
 REPEAT_NOTE = "повтор вакансии"  # та же вакансия уже в списке (matching.drop_repeats)
+CHAIN_NOTE = "та же вакансия сети в другом городе"  # в строке первой (matching.group_chains)
 OFFER_WINDOW = timedelta(days=7)  # /last: заказы FL обычно открыты несколько дней
 OFFER_CLOSED = ("applied", "skipped", "sent")
 OWN_OFFER_FLAG = "offer:{platform}:{external_id}"  # "цена,срок" — указанные пользователем
@@ -139,12 +143,20 @@ class Pipeline:
         город, стаж, площадки из резюме), а не по settings.toml (решение 2026-10-25)."""
         return completed_anketa(self.storage, self.settings.owner_id)
 
+    @property
+    def lesson_scope(self) -> str:
+        """Чьи правила отметок действуют: резюме пройденной анкеты, без неё — '' (ADR 0018)."""
+        return lesson_scope(self.anketa())
+
+    def lessons(self) -> list[Lesson]:
+        return self.storage.lessons(self.owner_key, self.lesson_scope)
+
     def scoring_settings(self) -> Settings:
         """Настройки отбора (анкеты владельца, если пройдена) с правилами из его отметок
-        (ADR 0013), прочитанными сейчас."""
+        (ADR 0013) для этого резюме, прочитанными сейчас."""
         data = self.anketa()
         base = user_settings(data, self.settings) if data else self.settings
-        return replace(base, lessons=tuple(self.storage.lessons(self.owner_key)))
+        return replace(base, lessons=tuple(self.lessons()))
 
     def _rejected(self, p: Project, result: ScoreResult, scoring: Settings,
                   anketa: dict[str, Any] | None) -> str | None:  # fmt: skip
@@ -348,20 +360,34 @@ class Pipeline:
         return estimate(p, self._score(p), self.settings)
 
     def digest_items(self) -> list[tuple[Project, ScoreResult]]:
-        """Новые заказы, ещё не присланные (статус queued), свежие первыми — как в /last.
-        Очередь сперва сверяется с отметками и анкетой: их могли сменить после сбора.
-        Повторы одной вакансии (сети выкладывают десятки одинаковых) — один раз, остальные
-        больше не придут."""
+        """Новые заказы, ещё не присланные (статус queued), в порядке /last. Очередь сперва
+        сверяется с отметками и анкетой: их могли сменить после сбора. Повторы одной вакансии
+        (на разных площадках тоже) — один раз, сеть с одной должностью в разных городах —
+        одной строкой; остальные больше не придут."""
         self.apply_lessons()
         since = self._clock() - OFFER_WINDOW
         items = [(p, self._score(p)) for p in self.storage.projects_with_status("queued", since)]
-        items.sort(key=lambda item: (item[0].published_at, item[1].score), reverse=True)
-        kept = drop_repeats(items)
-        shown = {(p.platform, p.external_id) for p, _ in kept}
+        kept, absorbed = group_chains(self._ordered(items))
+        for p in absorbed:
+            self.storage.set_status(p.platform, p.external_id, "filtered_out", CHAIN_NOTE)
+        shown = {(p.platform, p.external_id) for p, _ in kept} | {
+            (p.platform, p.external_id) for p in absorbed
+        }
         for p, _ in items:
             if (p.platform, p.external_id) not in shown:
                 self.storage.set_status(p.platform, p.external_id, "filtered_out", REPEAT_NOTE)
         return kept
+
+    def _ordered(
+        self, items: list[tuple[Project, ScoreResult]]
+    ) -> list[tuple[Project, ScoreResult]]:
+        """Порядок списков владельца без повторов: по анкете — как у неё (свой город, свежие,
+        подходящие; matching.rank), без анкеты — свежие сверху, при равном времени —
+        релевантнее (решение пользователя: свежесть важнее балла)."""
+        if data := self.anketa():
+            return rank(items, data, self._clock())
+        items = sorted(items, key=lambda item: (item[0].published_at, item[1].score), reverse=True)
+        return drop_repeats(items)
 
     # ── самообучение (ADR 0013) ──────────────────────────────────────────────
 
@@ -373,10 +399,11 @@ class Pipeline:
         p = self.storage.get_project(platform, external_id)
         if p is None:
             return None
-        known = self.storage.lessons(self.owner_key)
-        changes = learning.learn(reason, p, self.settings, known)
+        known = self.lessons()
+        changes = learning.learn(reason, p, self.scoring_settings(), known)
+        scope = self.lesson_scope
         for c in changes:
-            self.storage.save_lesson(self.owner_key, c.kind, c.value, c.weight, p.title)
+            self.storage.save_lesson(self.owner_key, c.kind, c.value, c.weight, p.title, scope)
         return changes, (self.apply_lessons() if changes else 0)
 
     def apply_lessons(self) -> int:
@@ -399,8 +426,8 @@ class Pipeline:
             self.storage.set_status(p.platform, p.external_id, "notified", "дайджест")
 
     def offer_candidates(self, limit: int = 10) -> list[tuple[Project, ScoreResult]]:
-        """Подходящие заказы за OFFER_WINDOW, на которые ещё не откликались: свежие первыми,
-        при равном времени — релевантнее (решение пользователя: свежесть важнее балла).
+        """Подходящие заказы за OFFER_WINDOW, на которые ещё не откликались, в порядке
+        `_ordered`; сеть с одной должностью в разных городах — одной строкой.
 
         В отличие от карточек, сюда попадают и проекты, скрытые bootstrap или по возрасту:
         балл считается на момент публикации, чтобы возраст не отсекал заказ."""
@@ -413,8 +440,7 @@ class Pipeline:
             if self._rejected(p, result, scoring, anketa) or self._paid_response_skipped(p):
                 continue
             items.append((p, result))
-        items.sort(key=lambda item: (item[0].published_at, item[1].score), reverse=True)
-        return drop_repeats(items)[:limit]
+        return group_chains(self._ordered(items))[0][:limit]
 
     async def response(self, platform: Platform | str, external_id: str) -> Offer | None:
         """Готовый отклик на выбранный заказ: последний черновик (нет — новый) с ценой и

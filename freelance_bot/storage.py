@@ -10,7 +10,7 @@ import json
 import sqlite3
 from collections.abc import Callable
 from dataclasses import asdict
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime, time, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -142,7 +142,55 @@ MIGRATIONS: tuple[str, ...] = (
     DROP TABLE lessons;
     ALTER TABLE lessons_new RENAME TO lessons;
     """,
+    # Правила — для резюме (ADR 0018): scope — профессия анкеты, '' — profile.toml владельца.
+    # Сменил резюме — правила прошлого не действуют, вернулся к нему — снова работают.
+    # Правила, записанные после прохождения анкеты, переносятся в её профессию.
+    """
+    CREATE TABLE lessons_new (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id           INTEGER NOT NULL,
+        scope           TEXT NOT NULL DEFAULT '',
+        kind            TEXT NOT NULL
+            CHECK (kind IN ('topic', 'level', 'office', 'pay', 'company', 'skill', 'experience')),
+        value           TEXT NOT NULL,
+        weight          INTEGER NOT NULL,
+        hits            INTEGER NOT NULL DEFAULT 1 CHECK (hits > 0),
+        example         TEXT NOT NULL DEFAULT '',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        UNIQUE (tg_id, scope, kind, value)
+    );
+    INSERT INTO lessons_new
+        (id, tg_id, scope, kind, value, weight, hits, example, created_at, updated_at)
+        SELECT l.id, l.tg_id,
+            COALESCE((SELECT trim(json_extract(u.data, '$.profile.profession')) FROM users u
+                      WHERE u.tg_id = l.tg_id AND u.completed_at IS NOT NULL
+                        AND l.created_at >= u.completed_at
+                        AND json_array_length(COALESCE(json_extract(u.data, '$.directions'),
+                                                       '[]')) = 0), ''),
+            l.kind, l.value, l.weight, l.hits, l.example, l.created_at, l.updated_at
+        FROM lessons l;
+    DROP TABLE lessons;
+    ALTER TABLE lessons_new RENAME TO lessons;
+    """,
+    # Отметки пользователя анкеты под вакансиями своего списка (ADR 0018): показано,
+    # откликнулся, не подходит. Живой поиск в projects не пишется — там сбор владельца, и
+    # вакансия, записанная туда раньше него, не пришла бы ему как новая; поэтому вакансия
+    # (JSON) — здесь, для кнопок и обучения. /forget удаляет.
+    """
+    CREATE TABLE user_marks (
+        tg_id           INTEGER NOT NULL,
+        platform        TEXT NOT NULL,
+        external_id     TEXT NOT NULL,
+        mark            TEXT NOT NULL CHECK (mark IN ('shown', 'applied', 'skipped')),
+        project         TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        PRIMARY KEY (tg_id, platform, external_id)
+    );
+    """,
 )
+MARKS: tuple[str, ...] = ("shown", "applied", "skipped")
+MARKS_KEEP = timedelta(days=30)  # «показано» старше — удаляется: вакансии столько не живут
 
 
 def _utc_iso(dt: datetime) -> str:
@@ -466,6 +514,7 @@ class Storage:
     def delete_user(self, tg_id: int) -> bool:
         with self._conn:
             self._conn.execute("DELETE FROM lessons WHERE tg_id = ?", (tg_id,))
+            self._conn.execute("DELETE FROM user_marks WHERE tg_id = ?", (tg_id,))
             return self._conn.execute("DELETE FROM users WHERE tg_id = ?", (tg_id,)).rowcount > 0
 
     @staticmethod
@@ -483,9 +532,11 @@ class Storage:
 
     # ── самообучение (ADR 0013) ──────────────────────────────────────────────
 
-    def lessons(self, tg_id: int) -> list[Lesson]:
+    def lessons(self, tg_id: int, scope: str = "") -> list[Lesson]:
+        """Правила человека для резюме `scope` (профессия анкеты; '' — profile.toml)."""
         rows = self._conn.execute(
-            "SELECT * FROM lessons WHERE tg_id = ? ORDER BY kind, updated_at DESC", (tg_id,)
+            "SELECT * FROM lessons WHERE tg_id = ? AND scope = ? ORDER BY kind, updated_at DESC",
+            (tg_id, scope),
         ).fetchall()
         return [
             Lesson(
@@ -495,19 +546,29 @@ class Storage:
             for r in rows
         ]
 
-    def save_lesson(self, tg_id: int, kind: str, value: str, weight: int, example: str) -> None:
+    def lesson_scopes(self, tg_id: int) -> dict[str, int]:
+        """Сколько правил у каждого резюме человека."""
+        rows = self._conn.execute(
+            "SELECT scope, COUNT(*) AS n FROM lessons WHERE tg_id = ? GROUP BY scope", (tg_id,)
+        ).fetchall()
+        return {r["scope"]: int(r["n"]) for r in rows}
+
+    def save_lesson(
+        self, tg_id: int, kind: str, value: str, weight: int, example: str, scope: str = ""
+    ) -> None:
         """Новое правило или то же ещё раз: вес заменяется, счётчик отметок растёт."""
         now = self._now()
         with self._conn:
             self._conn.execute(
                 """
-                INSERT INTO lessons (tg_id, kind, value, weight, example, created_at, updated_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT (tg_id, kind, value) DO UPDATE SET weight = excluded.weight,
+                INSERT INTO lessons (tg_id, scope, kind, value, weight, example, created_at,
+                    updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (tg_id, scope, kind, value) DO UPDATE SET weight = excluded.weight,
                     hits = lessons.hits + 1, example = excluded.example,
                     updated_at = excluded.updated_at
                 """,
-                (tg_id, kind, value, weight, example, now, now),
+                (tg_id, scope, kind, value, weight, example, now, now),
             )
 
     def delete_lesson(self, tg_id: int, lesson_id: int) -> bool:
@@ -519,9 +580,63 @@ class Storage:
                 > 0
             )
 
-    def clear_lessons(self, tg_id: int) -> int:
+    def clear_lessons(self, tg_id: int, scope: str = "") -> int:
         with self._conn:
-            return self._conn.execute("DELETE FROM lessons WHERE tg_id = ?", (tg_id,)).rowcount
+            return self._conn.execute(
+                "DELETE FROM lessons WHERE tg_id = ? AND scope = ?", (tg_id, scope)
+            ).rowcount
+
+    # ── отметки пользователей анкеты (ADR 0018) ──────────────────────────────
+
+    def mark_shown(self, tg_id: int, projects: list[Project]) -> None:
+        """Вакансии списка человека — для его кнопок; отметки «откликнулся» и «не подходит»
+        не затираются. Старые «показано» удаляются."""
+        now = self._now()
+        with self._conn:
+            for p in projects:
+                self._conn.execute(
+                    """
+                    INSERT INTO user_marks (tg_id, platform, external_id, mark, project,
+                        updated_at)
+                    VALUES (?, ?, ?, 'shown', ?, ?)
+                    ON CONFLICT (tg_id, platform, external_id) DO UPDATE SET
+                        project = excluded.project, updated_at = excluded.updated_at
+                    """,
+                    (tg_id, p.platform, p.external_id, _project_json(p), now),
+                )
+            self._conn.execute(
+                "DELETE FROM user_marks WHERE mark = 'shown' AND updated_at < ?",
+                (_utc_iso(self._clock() - MARKS_KEEP),),
+            )
+
+    def set_mark(self, tg_id: int, platform: str, external_id: str, mark: str) -> bool:
+        """Отметка вакансии из списка человека; её нет в его списке — False."""
+        if mark not in MARKS:
+            raise ValueError(f"неизвестная отметка {mark!r}; допустимо: {', '.join(MARKS)}")
+        with self._conn:
+            return (
+                self._conn.execute(
+                    "UPDATE user_marks SET mark = ?, updated_at = ? "
+                    "WHERE tg_id = ? AND platform = ? AND external_id = ?",
+                    (mark, self._now(), tg_id, platform, external_id),
+                ).rowcount
+                > 0
+            )
+
+    def marked_project(self, tg_id: int, platform: str, external_id: str) -> Project | None:
+        row = self._conn.execute(
+            "SELECT project FROM user_marks WHERE tg_id = ? AND platform = ? AND external_id = ?",
+            (tg_id, platform, external_id),
+        ).fetchone()
+        return None if row is None else _project_from_json(row["project"])
+
+    def closed_marks(self, tg_id: int) -> set[tuple[str, str]]:
+        """Вакансии, на которые человек откликнулся или отметил «не подходит»."""
+        rows = self._conn.execute(
+            "SELECT platform, external_id FROM user_marks WHERE tg_id = ? AND mark != 'shown'",
+            (tg_id,),
+        ).fetchall()
+        return {(r["platform"], r["external_id"]) for r in rows}
 
     # ── статистика ───────────────────────────────────────────────────────────
 
@@ -536,3 +651,15 @@ class Storage:
         ).fetchall()
         counts = {r["kind"]: int(r["n"]) for r in rows}
         return {key: counts.get(key, 0) for key in STATS_KEYS}
+
+
+def _project_json(p: Project) -> str:
+    raw = asdict(p)
+    raw["published_at"] = _utc_iso(p.published_at)
+    return json.dumps(raw, ensure_ascii=False, default=str)
+
+
+def _project_from_json(text: str) -> Project:
+    raw = json.loads(text)
+    raw["published_at"] = datetime.fromisoformat(raw["published_at"])
+    return Project(**raw)

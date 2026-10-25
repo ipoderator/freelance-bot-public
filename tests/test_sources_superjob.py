@@ -235,6 +235,7 @@ async def test_pipeline_sends_vacancy_cards_without_drafts():
     assert "💵 зарплата: 150 000–220 000 ₽" in text
     assert "🌐 SuperJob · 🕐 опубликована 24.10.2026 14:05 МСК" in text
     assert [b[1] for row in keyboard for b in row] == [
+        "letter:superjob:51000001",
         "applied:superjob:51000001",
         "skip:superjob:51000001",
         "nofit:superjob:51000001",

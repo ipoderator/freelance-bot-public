@@ -6,7 +6,7 @@
 from __future__ import annotations
 
 import html
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterable, Mapping, Sequence
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -45,12 +45,25 @@ BUTTON_REDRAFT = "🔄 Другой вариант"
 BUTTON_OFFER = "💬 Цена и срок"
 BUTTON_CANCEL = "✖ Отмена"
 BUTTON_NOFIT = "👎 Не подходит"
+BUTTON_LETTER = "✉️ Письмо работодателю"
+BUTTON_LETTER_AGAIN = "🔄 Другое письмо"
 BUTTON_FORGET_ALL = "🗑 Забыть всё"
 OFFER_EXAMPLE = "15000, 5"
 SUMMARY_MARK = "📝"
 LIST_TITLE = "📋 <b>Подходящие заказы</b> — свежие сверху"
 DIGEST_TITLE = "🆕 <b>Новые заказы</b> — {count}"
 PICK_HINT = "Выберите кнопкой или пришлите номер — пришлю готовый отклик."
+VACANCY_PICK_HINT = (
+    "Выберите кнопкой или пришлите номер — пришлю карточку со ссылкой и письмом работодателю."
+)
+MIXED_PICK_HINT = (
+    "Выберите кнопкой или пришлите номер — к заказу пришлю готовый отклик, к вакансии — "
+    "письмо работодателю."
+)
+DIGEST_MORE = (
+    "Ещё новых: {rest} — пришлю в следующем списке; все подходящие — «{all}»."
+)
+MAX_ALSO_IN = 5  # городов сети в строке вакансии
 
 # Постоянное меню под полем ввода (ReplyKeyboardMarkup): нажатие присылает этот текст
 MENU_NEW = "🆕 Новые"
@@ -94,7 +107,10 @@ PLATFORM_TIPS: dict[str, tuple[str, ...]] = {
 }
 # Вакансии HH: отклик пользователь делает на hh.ru сам — без черновика, цены и срока
 MAX_MESSAGE_LEN = 4000  # Telegram режет на 4096; запас на HTML-разметку
-VACANCY_NOTE = "Отклик на вакансию — на hh.ru, по ссылке: бот вакансиям отклики не готовит."
+VACANCY_NOTE = (
+    f"Откликаются на вакансию по ссылке; текст отклика — кнопка «{BUTTON_LETTER}», "
+    "отправляете его вы."
+)
 ESTIMATE_MARK = "🧮"
 REASON_MARK = "🎯"
 REASON_MAX_CHARS = 120
@@ -145,8 +161,11 @@ def _salary(p: Project) -> str:
 
 
 def _employer(p: Project) -> str:
-    """«🏢 Компания · 📍 Город» для вакансии."""
-    parts = [f"🏢 {esc(p.extra.get('company') or 'компания не указана')}"]
+    """«🏢 Компания · 📍 Город» для вакансии; у поста из канала компании нет — канал."""
+    if not p.extra.get("company") and p.extra.get("channel"):
+        parts = [f"📣 канал @{esc(p.extra['channel'])}"]
+    else:
+        parts = [f"🏢 {esc(p.extra.get('company') or 'компания не указана')}"]
     if p.extra.get("area"):
         parts.append(f"📍 {esc(p.extra['area'])}")
     return " · ".join(parts)
@@ -255,8 +274,9 @@ def format_draft(d: Draft, estimated: bool = False) -> str:
 
 def card_keyboard(platform: Platform | str, external_id: str) -> list[list[tuple[str, str]]]:
     nofit = [(BUTTON_NOFIT, f"nofit:{platform}:{external_id}")]
-    if platform in VACANCY_PLATFORMS:  # без «Цена и срок» и «Другой вариант»: отклик на hh.ru
+    if platform in VACANCY_PLATFORMS:  # без «Цена и срок»: отклик на сайте, письмо — по кнопке
         return [
+            [(BUTTON_LETTER, f"letter:{platform}:{external_id}")],
             [
                 (BUTTON_APPLIED, f"applied:{platform}:{external_id}"),
                 (BUTTON_SKIP, f"skip:{platform}:{external_id}"),
@@ -286,7 +306,8 @@ def nofit_keyboard(p: Project) -> list[list[tuple[str, str]]]:
 
 
 def format_learned(
-    reason: str, changes: Sequence[learning.Change], removed: int, min_score: int
+    reason: str, changes: Sequence[learning.Change], removed: int, min_score: int,
+    where: str = f"{MENU_LEARNED} или /learned",
 ) -> str:
     """Ответ на причину: что именно запомнил и как это меняет отбор."""
     lines = [f"🧠 <b>Запомнил</b> — {esc(learning.REASONS.get(reason, reason))}:"]
@@ -298,15 +319,21 @@ def format_learned(
         )
     if removed:
         lines.append(f"Из ближайшего списка новых убрал похожих: {removed}.")
-    lines.append(f"Всё, чему я научился, и как отменить — {MENU_LEARNED} или /learned.")
+    lines.append(f"Всё, чему я научился, и как отменить — {where}.")
     return "\n".join(lines)
 
 
-def format_lessons(lessons: Sequence[Lesson]) -> str:
-    """/learned: правила из отметок с номерами — номер на кнопке снимает правило."""
-    lines = ["🧠 <b>Чему я научился по вашим отметкам</b>", "", esc(LEARNING_HOW), ""]
+def format_lessons(
+    lessons: Sequence[Lesson], how: str = LEARNING_HOW, scope: str = "",
+    empty: str = "Пока отметок нет — отбор идёт только по профилю и фильтрам (/filters).",
+) -> str:
+    """/learned: правила из отметок с номерами — номер на кнопке снимает правило. `scope` —
+    резюме, к которому они относятся (у каждого резюме свои, ADR 0018)."""
+    lines = ["🧠 <b>Чему я научился по вашим отметкам</b>", "", esc(how), ""]
+    if scope:
+        lines[1:1] = [f"Для резюме «{esc(scope)}»: у другого резюме — свои отметки."]
     if not lessons:
-        lines.append("Пока отметок нет — отбор идёт только по профилю и фильтрам (/filters).")
+        lines.append(empty)
         return "\n".join(lines)
     for number, x in enumerate(lessons, 1):
         times = f" (отметок: {x.hits})" if x.hits > 1 else ""
@@ -317,11 +344,13 @@ def format_lessons(lessons: Sequence[Lesson]) -> str:
     return "\n".join(lines)
 
 
-def lessons_keyboard(lessons: Sequence[Lesson]) -> list[list[tuple[str, str]]]:
-    buttons = [(f"✖ {n}", f"unlearn:{x.id}") for n, x in enumerate(lessons, 1)]
+def lessons_keyboard(
+    lessons: Sequence[Lesson], prefix: str = "unlearn:"
+) -> list[list[tuple[str, str]]]:
+    buttons = [(f"✖ {n}", f"{prefix}{x.id}") for n, x in enumerate(lessons, 1)]
     rows = [buttons[i : i + 4] for i in range(0, len(buttons), 4)]
     if lessons:
-        rows.append([(BUTTON_FORGET_ALL, "unlearn:all")])
+        rows.append([(BUTTON_FORGET_ALL, f"{prefix}all")])
     return rows
 
 
@@ -343,6 +372,8 @@ def format_offer_list(
             "За последнюю неделю подходящих заказов, на которые вы ещё не откликнулись, нет. "
             "Новые пришлю сам, как только появятся."
         )
+    if hint == PICK_HINT and any(is_vacancy(p) for p, _ in items):
+        hint = VACANCY_PICK_HINT if all(is_vacancy(p) for p, _ in items) else MIXED_PICK_HINT
     lines = [title, hint, ""] if start == 1 else []
     for index, (p, score) in enumerate(items):
         number = start + index
@@ -360,6 +391,8 @@ def format_offer_list(
         lines.append(" · ".join(when))
         if is_vacancy(p):
             lines.append(f"{_employer(p)} · 💵 {esc(_salary(p))}")
+            if also := _also_in(p):
+                lines.append(also)
             reason = reasons[index] if reasons else ""
             if reason:
                 lines.append(f"{REASON_MARK} {esc(reason)}")
@@ -379,17 +412,45 @@ def format_offer_list(
     return "\n".join(lines).rstrip()
 
 
-def format_start(next_digest: str | None) -> str:
+def _also_in(p: Project) -> str:
+    """«📍 ещё в 12 городах: Липецк, Курск…» — сеть с той же должностью (group_chains)."""
+    also = [str(a) for a in p.extra.get("also_in") or []]
+    if not also:
+        return ""
+    shown = ", ".join(also[:MAX_ALSO_IN]) + ("…" if len(also) > MAX_ALSO_IN else "")
+    n = len(also)
+    word = "городе" if n % 10 == 1 and n % 100 != 11 else "городах"
+    return f"📍 ещё в {n} {word}: {esc(shown)}"
+
+
+def _names(platforms: Iterable[str]) -> str:
+    names = [PLATFORM_NAMES.get(p, p) for p in platforms]
+    return names[0] if len(names) == 1 else ", ".join(names[:-1]) + f" и {names[-1]}"
+
+
+def format_start(
+    next_digest: str | None, platforms: Sequence[str] = (), when: str = "раз в час"
+) -> str:
+    """Меню владельца: площадки — те, с которых бот сейчас собирает; `when` — расписание
+    списка новых (анкеты владельца или settings.toml)."""
+    orders = [p for p in platforms if p not in VACANCY_PLATFORMS]
+    vacancies = [p for p in platforms if p in VACANCY_PLATFORMS]
+    what = []
+    if orders:
+        what.append(f"заказы на {_names(orders)}")
+    if vacancies:
+        what.append(f"вакансии ({_names(vacancies)})")
     lines = [
-        "👋 <b>Привет!</b> Я ищу заказы на FL.ru, Kwork, Work24 и Freelance.ru под ваш профиль "
+        f"👋 <b>Привет!</b> Я ищу {' и '.join(what) or 'заказы и вакансии'} под ваш профиль "
         "и готовлю отклики.",
         "",
-        f"{MENU_NEW} — заказы, которых вы ещё не видели",
-        f"{MENU_ALL} — подходящие за неделю, свежие сверху",
-        "Выберите заказ кнопкой или номером — пришлю текст отклика и цену со сроком для формы.",
+        f"{MENU_NEW} — то, чего вы ещё не видели",
+        f"{MENU_ALL} — подходящее за неделю",
+        "Выберите кнопкой или номером: к заказу пришлю текст отклика с ценой и сроком, к "
+        "вакансии — карточку и письмо работодателю.",
     ]
     if next_digest:
-        lines += ["", f"⏰ Новые присылаю сам раз в час, следующий список — {esc(next_digest)}."]
+        lines += ["", f"⏰ Новые присылаю сам {esc(when)}, следующий список — {esc(next_digest)}."]
     lines += ["", f"🧠 {LEARNING_HOW} Чему я научился — {MENU_LEARNED}."]
     lines += ["", "Ещё: /filters — фильтры, /pause и /resume — пауза."]
     return "\n".join(lines)
@@ -472,6 +533,28 @@ def format_offer(
     if tips:
         lines += ["", f"💡 <b>{site}:</b>"]
         lines.extend(f"• {esc(tip)}" for tip in tips)
+    return "\n".join(lines)
+
+
+def vacancy_link_label(p: Project) -> str:
+    if p.platform == "tgchannels":
+        return "🔗 Открыть пост в Telegram"
+    return f"🔗 Открыть вакансию на {PLATFORM_NAMES.get(p.platform, p.platform)}"
+
+
+def format_letter(p: Project, text: str, generator: str, variant: int = 0) -> str:
+    """Письмо к вакансии: текст для копирования; чем написано — шаблон или нейросеть."""
+    url = html.escape(p.url, quote=True)
+    head = f"🔄 <b>Письмо, вариант {variant + 1}:</b>" if variant else "✉️ <b>Письмо:</b>"
+    how = "нейросеть по вашему резюме" if generator == "llm" else "шаблон по вашему резюме"
+    lines = [
+        f"{head} {esc(p.title)}",
+        f'🔗 <a href="{url}">Вакансия</a> · {how}',
+        "",
+        "📋 <b>Текст</b> — нажмите на него, чтобы скопировать:",
+        f"<pre>{esc(text)}</pre>",
+        "Проверьте факты перед отправкой: откликаетесь вы, бот ничего не отправляет.",
+    ]
     return "\n".join(lines)
 
 

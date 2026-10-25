@@ -15,6 +15,7 @@ from typing import Any
 
 from dotenv import dotenv_values
 
+from freelance_bot.fit import ResumeFit
 from freelance_bot.models import MODES, PLATFORMS, Lesson, Mode, Platform
 
 MIN_INTERVAL_SEC = 60
@@ -130,6 +131,9 @@ class Settings:
     # Правила из отметок пользователя (learning.py, ADR 0013): из settings.toml не читаются,
     # их подставляет Pipeline (владелец) или анкета (пользователь) из таблицы lessons
     lessons: tuple[Lesson, ...] = ()
+    # Смысл должности под резюме анкеты (fit.py, ADR 0018): сфера, специализация, уровень;
+    # подставляет matching.user_settings, у владельца без анкеты — None
+    fit: ResumeFit | None = None
 
     @property
     def signup_platforms(self) -> tuple[Platform, ...]:

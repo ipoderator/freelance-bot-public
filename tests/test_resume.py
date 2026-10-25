@@ -414,7 +414,9 @@ CASES = {
                        ["Администратор — Гостиница «Центральная»",
                         "Оператор бронирования — Гостевой дом «Липа»"], 5,
                        ["Курсы гостиничного сервиса · 2020"]),
-    "10_florist": ("Флорист", "Курск", 5.0, ["Флорист — Салон цветов «Лепесток»"], 4,
+    # второе место — «2020 (сезонно)»: одним годом, сезон — 3 месяца (отчёт QA 2026-10-25)
+    "10_florist": ("Флорист", "Курск", 5.2, ["Флорист — Салон цветов «Лепесток»",
+                                             "Помощник продавца — Цветочный павильон"], 4,
                    ["Курсы флористики · 2021"]),
 }  # fmt: skip
 
@@ -465,9 +467,14 @@ def test_period_formats(period, months):
     assert job.end - job.start + 1 == months and job.title == "Повар — Кафе"
 
 
-def test_single_years_and_education_are_not_jobs():
+def test_single_year_job_counts_and_education_does_not():
     text = "Опыт работы\nПовар\n2020 (сезонно)\nОбучение\nКурсы, 2019 — 2020"
-    assert work_periods(text, TODAY) == []
+    [job] = work_periods(text, TODAY)
+    assert (job.title, job.period, job.end - job.start + 1) == ("Повар", "2020, сезонно", 3)
+    whole = work_periods("Опыт работы\nКассир — Магазин\n2019\nНавыки\nКасса", TODAY)
+    assert [(j.label, j.end - j.start + 1) for j in whole] == [("Кассир — Магазин (2019)", 12)]
+    # год в «О себе» или в строке с текстом — не место работы
+    assert work_periods("О себе\n2020\nОпыт работы\nВ 2020 году работал", TODAY) == []
 
 
 def test_title_under_period_in_hh_layout():

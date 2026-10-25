@@ -8,8 +8,11 @@
   анкетой — ещё и при каждом сборе (`AnketaVacancies`), меню и дайджест — по анкете;
 - профессия и навыки из резюме — направления отбора (`user_settings`);
 - то, что резюме не выполняет, отсекается (`mismatch`): требуемый стаж больше, чем в
-  резюме; вакансия не по профессии; IT-вакансия не разработчику; в другом городе или
-  удалённая — если человек не выбрал их в анкете (`location_choice`).
+  резюме; вакансия не по профессии; IT-вакансия не разработчику; в другом городе, вахтой или
+  с проживанием, удалённая — если человек не выбрал их в анкете (`location_choice`);
+- сфера, специализация и уровень должности — поправка к баллу и отсечение (fit.py, ADR 0018);
+- порядок: свой город, свежие за FRESH_FIRST, балл (`rank`); одна вакансия на разных
+  площадках и сеть с одной должностью в разных городах — одной строкой (`group_chains`).
 """
 
 from __future__ import annotations
@@ -25,6 +28,7 @@ from typing import Any
 
 from freelance_bot.config import Direction, Settings
 from freelance_bot.experience import required_years, years_word
+from freelance_bot.fit import ResumeFit
 from freelance_bot.http import Fetcher
 from freelance_bot.models import VACANCY_PLATFORMS, Platform, Project, ScoreResult
 from freelance_bot.resume import IT_ROLE_TERMS, ResumeProfile
@@ -41,6 +45,7 @@ PROFESSION_KEY = "profession"
 SKILLS_KEY = "skills"
 SKILLS_WEIGHT = 0.5  # навыки подтверждают профессию, но сами по себе её не заменяют
 VACANCY_WINDOW = timedelta(days=14)  # вакансии открыты дольше заказов
+FRESH_FIRST = timedelta(hours=48)  # такие — выше более подходящих, но старых: откликнуться первым
 MAX_QUERIES = 3  # запросов к API на анкету: профессия и прошлые должности
 SEARCH_PAGES = 1  # SuperJob: по 40 вакансий на запрос — свежие сверху
 # живой поиск под анкету
@@ -73,6 +78,14 @@ IT_VACANCY_TERMS = (*IT_ROLE_TERMS, "системный администрато
 PREPOSITIONS = frozenset(
     {"на", "в", "во", "по", "для", "с", "со", "и", "из", "от", "до", "при", "за"}
 )
+# Работа не в городе из поля area: «ВАХТА С ПРОЖИВАНИЕМ В МОСКВЕ» у вакансии с «📍 Воронеж»
+# («вахтёр», «вахтёрский пост» — работа в своём городе: у «вахты» — только её окончания)
+_AWAY_RE = re.compile(
+    r"(?<!\w)(?:вахт(?:а|ой|у|е|ы|ов\w*)(?!\w)|с\s+проживанием|проживание\s+предоставля"
+    r"|предоставля\w*\s+проживание|переезд|релокац)",
+    re.IGNORECASE,
+)
+AWAY_REASON = "вахта или работа с проживанием в другом городе"
 _WORD_RE = re.compile(r"[\wё]+(?:-[\wё]+)*", re.IGNORECASE)
 
 
@@ -92,15 +105,20 @@ def location_choice(data: dict[str, Any]) -> tuple[str, ...]:
 
 
 def place_mismatch(p: Project, data: dict[str, Any]) -> str | None:
-    """Вакансия удалённая или в другом городе, а человек такие не выбрал."""
+    """Вакансия удалённая или в другом городе, а человек такие не выбрал. Город — не только
+    из area: вахта и работа с проживанием — в другом городе, что бы ни стояло в area."""
     profile = resume_profile(data)
     area = str(p.extra.get("area") or "").casefold()
     city = profile.city.casefold() if profile else ""
     chosen = location_choice(data)
     if REMOTE_AREA in area:
         return None if REMOTE in chosen else "удалённая работа"
-    if city and area and city not in area and OTHER_CITIES not in chosen:
+    if OTHER_CITIES in chosen:
+        return None
+    if city and area and city not in area:
         return "другой город"
+    if city and _AWAY_RE.search(f"{p.title}\n{p.description}".replace("ё", "е")):
+        return AWAY_REASON
     return None
 
 
@@ -118,7 +136,8 @@ def _stem(word: str) -> str:
 def _roles(profile: ResumeProfile) -> list[str]:
     """Прошлые должности: «Кассир — Супермаркет (2021 — 2023)» → «Кассир». У hh.ru в
     местах работы стоит компания, а не должность, — у них нет « — », они пропускаются."""
-    return [job.split(" — ")[0].strip() for job in profile.jobs if " — " in job]
+    jobs = [job.split(" — ")[0].strip() for job in profile.jobs if " — " in job]
+    return [*profile.roles, *jobs]
 
 
 def _words(title: str) -> list[str]:
@@ -187,40 +206,98 @@ def user_settings(data: dict[str, Any], settings: Settings) -> Settings:
     profile = resume_profile(data)
     directions = {k: d for k, d in settings.directions.items() if k in chosen}
     exclusions = settings.exclusions
+    fit = None
     if profile is not None and not chosen:
+        # уточнения должности («кофейни», «горячего цеха») — только по названию вакансии
+        # (fit.py): в описании магазина «кофе» — товар, а не место работы
         if terms := title_terms(profile):
-            directions[PROFESSION_KEY] = Direction(keywords=[*terms, *qualifier_terms(profile)])
+            directions[PROFESSION_KEY] = Direction(keywords=terms)
         if skills := [s for s in (*profile.skills, *profile.keywords) if len(s) >= 3]:
             directions[SKILLS_KEY] = Direction(keywords=skills, weight=SKILLS_WEIGHT)
         exclusions = {k: v for k, v in settings.exclusions.items() if k == MILITARY_KEY}
+        fit = resume_fit(profile)
     return replace(
         settings,
         directions=directions,
         exclusions=exclusions,
         experience_years=profile.experience_years if profile else 0.0,
+        fit=fit,
     )
 
 
-def rank(items: list[tuple[Project, ScoreResult]], data: dict[str, Any]
-         ) -> list[tuple[Project, ScoreResult]]:  # fmt: skip
+def resume_fit(profile: ResumeProfile) -> ResumeFit:
+    """Сфера, специализация и уровень из резюме — для fit.apply."""
+    details = [*profile.skills, *profile.keywords, *(f.source for f in profile.facts)]
+    return ResumeFit.build(
+        profile.profession, _roles(profile), profile.jobs, details,
+        qualifier_terms(profile), profile.experience_years,
+    )  # fmt: skip
+
+
+def lesson_scope(data: dict[str, Any] | None) -> str:
+    """Чьи правила отметок действуют (ADR 0018): профессия анкеты; разработчику и без
+    анкеты — '' (как у profile.toml владельца). Сменил резюме — у нового свои правила."""
+    profile = resume_profile(data) if data else None
+    if profile is None or is_developer(data or {}):
+        return ""
+    return profile.profession.strip()
+
+
+def rank(items: list[tuple[Project, ScoreResult]], data: dict[str, Any],
+         now: datetime | None = None) -> list[tuple[Project, ScoreResult]]:  # fmt: skip
     """Порядок списка: разработчику — свежие сверху, как в /last; остальным — свой город
-    раньше других городов, затем самые подходящие резюме, затем свежие. Повторы одной
-    вакансии (то же название, компания и город — их выкладывают пачками) — один раз."""
+    раньше других городов, затем вышедшие за FRESH_FIRST (кто откликнется первым, того и
+    позовут), затем самые подходящие резюме, затем свежие. Повторы одной вакансии (то же
+    название, компания и город — их выкладывают пачками и на разных площадках) — один раз."""
     if is_developer(data):
         key = lambda item: (item[0].published_at, item[1].score)  # noqa: E731
     else:
-        key = lambda item: (_nearby(item[0], data), item[1].score,  # noqa: E731
-                            item[0].published_at)  # fmt: skip
+        fresh = (now or datetime.now(UTC)) - FRESH_FIRST
+        key = lambda item: (_nearby(item[0], data), item[0].published_at >= fresh,  # noqa: E731
+                            item[1].score, item[0].published_at)  # fmt: skip
     return drop_repeats(sorted(items, key=key, reverse=True))
+
+
+def _norm(text: object) -> str:
+    return " ".join(str(text or "").casefold().replace("ё", "е").split())
 
 
 def repeat_key(p: Project) -> tuple[str, ...]:
     """Заказы бирж с одним названием — обычно разные заказчики: повторами считаются только
-    вакансии."""
+    вакансии, и на разных площадках тоже (SuperJob и «Работа России» выкладывают одну и ту
+    же). Без компании (посты каналов) — только в пределах площадки: это разные работодатели."""
     if p.platform not in VACANCY_PLATFORMS:
         return (p.platform, p.external_id)
-    return (p.platform, p.title.casefold(), str(p.extra.get("company") or ""),
-            str(p.extra.get("area") or ""))  # fmt: skip
+    company = _norm(p.extra.get("company"))
+    return (p.platform if not company else "vacancy", _norm(p.title), company,
+            _norm(p.extra.get("area")))  # fmt: skip
+
+
+def group_chains(
+    items: list[tuple[Project, ScoreResult]],
+) -> tuple[list[tuple[Project, ScoreResult]], list[Project]]:
+    """Сеть с одной должностью в разных городах («Продавец-кассир» Пятёрочки в 40 городах) —
+    одной строкой: первая по порядку, у неё в extra["also_in"] — остальные города. Второе
+    значение — вакансии, вошедшие в чужую строку."""
+    kept: list[tuple[Project, ScoreResult]] = []
+    lead: dict[tuple[str, str], int] = {}
+    absorbed: list[Project] = []
+    for p, r in items:
+        company = _norm(p.extra.get("company"))
+        key = (_norm(p.title), company)
+        if p.platform not in VACANCY_PLATFORMS or not company or key not in lead:
+            if p.platform in VACANCY_PLATFORMS and company:
+                lead[key] = len(kept)
+            kept.append((p, r))
+            continue
+        first, score = kept[lead[key]]
+        area = str(p.extra.get("area") or "").strip()
+        also = list(first.extra.get("also_in") or [])
+        if area and area != first.extra.get("area") and area not in also:
+            also.append(area)
+        kept[lead[key]] = (replace(first, extra={**first.extra, "also_in": also}), score)
+        absorbed.append(p)
+    return kept, absorbed
 
 
 def drop_repeats(items: list[tuple[Project, ScoreResult]]) -> list[tuple[Project, ScoreResult]]:
@@ -292,12 +369,20 @@ class VacancySearch:
         return result
 
     async def __call__(
-        self, data: dict[str, Any], only: Platform | None = None
-    ) -> list[Project]:
+        self, data: dict[str, Any], only: Platform | None = None,
+        statuses: dict[str, str] | None = None,
+    ) -> list[Project]:  # fmt: skip
+        """`statuses` — заполняется ответом каждой площадки анкеты: «найдено N», «не
+        ответила», «выключена» — чтобы пустой список объяснял, что искалось."""
+        statuses = {} if statuses is None else statuses
         profile = resume_profile(data)
         if profile is None:
             return []
-        platforms = [p for p in self.available(data.get("platforms") or []) if only in (None, p)]
+        chosen_platforms = [p for p in data.get("platforms") or [] if p in SEARCH_PLATFORMS]
+        platforms = [p for p in self.available(chosen_platforms) if only in (None, p)]
+        for p in chosen_platforms:
+            if p not in platforms and only is None:
+                statuses[p] = "выключена"
         queries = search_queries(profile)
         if not platforms or not queries:
             return []
@@ -313,7 +398,9 @@ class VacancySearch:
                     raise projects
                 log.warning("вакансии под анкету: %s не ответил: %s", platform,
                             type(projects).__name__)  # fmt: skip
+                statuses[platform] = "не ответила"
                 continue
+            statuses[platform] = f"найдено {len(projects)} до отбора"
             for p in projects:
                 found.setdefault((p.platform, p.external_id), p)
         result = sorted(found.values(), key=lambda p: p.published_at, reverse=True)

@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import html
+import json
 import logging
 import random
 import re
@@ -37,22 +39,32 @@ from telegram.ext import (
 )
 
 from freelance_bot.config import Settings
+from freelance_bot.cover_letter import (
+    Applicant,
+    CoverLetterWriter,
+    applicant_from_anketa,
+    applicant_from_profile,
+)
 from freelance_bot.drafting import remaining_placeholders
 from freelance_bot.learning import REASONS, nothing_to_learn
-from freelance_bot.matching import VacancySearch
+from freelance_bot.matching import VacancySearch, completed_anketa
 from freelance_bot.models import Project, ScoreResult
 from freelance_bot.onboarding import PREFIX as ONBOARDING_PREFIX
 from freelance_bot.onboarding import PUBLIC_HELP, Onboarding
 from freelance_bot.pipeline import Keyboard, Offer, Pipeline
 from freelance_bot.pricing import estimate
+from freelance_bot.schedule import Schedule, describe, next_send_at
 from freelance_bot.storage import Storage
 from freelance_bot.telegram_ui import (
     BUTTON_APPLIED,
     BUTTON_CANCEL,
+    BUTTON_LETTER,
+    BUTTON_LETTER_AGAIN,
     BUTTON_NOFIT,
     BUTTON_OFFER,
     BUTTON_REDRAFT,
     BUTTON_SKIP,
+    DIGEST_MORE,
     DIGEST_TITLE,
     MAX_MESSAGE_LEN,
     MENU_ALL,
@@ -69,6 +81,7 @@ from freelance_bot.telegram_ui import (
     format_filters,
     format_learned,
     format_lessons,
+    format_letter,
     format_offer,
     format_offer_hint,
     format_offer_list,
@@ -81,6 +94,7 @@ from freelance_bot.telegram_ui import (
     nofit_keyboard,
     offer_list_keyboard,
     selection_reason,
+    vacancy_link_label,
 )
 
 log = logging.getLogger(__name__)
@@ -102,6 +116,7 @@ COMMANDS: list[tuple[str, str]] = [
 PUBLIC_COMMANDS: list[tuple[str, str]] = [
     ("start", "Анкета: заполнить или посмотреть"),
     ("profile", "Ваши данные"),
+    ("learned", "Чему бот научился по вашим отметкам"),
     ("forget", "Удалить мои данные"),
 ]
 DENIED_TEXT = "Этот бот личный. Доступ закрыт."
@@ -117,8 +132,15 @@ LAST_LIST_FLAG = "last_list"  # "<platform>:<id>,…" — заказы посл�
 MAX_OFFER_DAYS = 365
 MAX_OFFER_TEXT = 40  # «15 000 руб., 14 дней» — 21 символ
 MENU_VERSION_FLAG = "menu_version"
-CARD_ACTIONS = ("applied", "skip", "redraft", "offer", "cancel", "pick", "nofit")
+DIGEST_LAST_FLAG = "digest_last_at"  # когда прислан последний список новых (UTC ISO)
+DIGEST_TICK_SEC = 60  # как часто проверять, не пора ли список: расписание анкеты меняется
+DIGEST_LIMIT = 15  # карточек в одном списке новых: остальные — в следующем
+CARD_ACTIONS = ("applied", "skip", "redraft", "offer", "cancel", "pick", "nofit", "letter")
+LETTER_FLAG = "letter:{platform}:{external_id}"  # {"n": вариант, "text": последнее письмо}
 NOFIT_TITLE_MAX = 60
+LETTER_NAME_NOTE = (
+    "⚠ Подпись — ФИО из анкеты, а в резюме — «{name}». Проверьте письмо перед отправкой."
+)
 MENU_VERSION = "2"  # новое меню — новая версия: бот один раз пришлёт его сам после запуска
 MENU_MARKUP = ReplyKeyboardMarkup(
     [list(row) for row in MENU_ROWS], resize_keyboard=True, is_persistent=True
@@ -287,6 +309,7 @@ class BotHandlers:
         self.onboarding = Onboarding(
             settings, storage, summarize=summarize, search=VacancySearch(settings)
         )
+        self.letters = CoverLetterWriter(settings)
 
     def _is_owner(self, update: Update) -> bool:
         """Владелец и только в личке: в группе ответы (заказы, цены) увидели бы все."""
@@ -340,7 +363,7 @@ class BotHandlers:
     async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return await self._deny(update)
-        await self._reply(update, format_start(self._next_digest()), MENU_MARKUP)
+        await self._reply(update, self._start_text(), MENU_MARKUP)
 
     async def signup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Анкета глазами нового пользователя; профиль владельца (profile.toml) не меняется."""
@@ -358,15 +381,48 @@ class BotHandlers:
             return await self._deny(update)
         await self.onboarding.forget(update, context)
 
+    def digest_schedule(self) -> Schedule | None:
+        """Расписание списка новых: из анкеты владельца, если она пройдена (там его и
+        спрашивают); без неё — сетка settings.toml ([digest]), тогда None."""
+        data = completed_anketa(self.storage, self.settings.owner_id)
+        return Schedule.from_dict(data["schedule"]) if data and data.get("schedule") else None
+
+    def next_digest_slot(self, after: datetime) -> datetime:
+        s = self.settings
+        if (schedule := self.digest_schedule()) is not None:
+            return next_send_at(schedule, after, s.timezone)
+        return next_digest_at(after, s.timezone, s.digest_start_hour, s.digest_interval_min)
+
+    def digest_when(self) -> str:
+        """Как часто приходит список новых — словами, для меню."""
+        if (schedule := self.digest_schedule()) is not None:
+            return describe(schedule)
+        minutes = self.settings.digest_interval_min
+        return "раз в час" if minutes == 60 else f"каждые {minutes} мин"
+
     def _next_digest(self) -> str | None:
         """Время ближайшего дайджеста для показа («12:00»); дайджест выключен — None."""
         if not self.settings.digest_enabled:
             return None
-        s = self.settings
-        slot = next_digest_at(
-            datetime.now(UTC), s.timezone, s.digest_start_hour, s.digest_interval_min
-        )
-        return f"{slot.astimezone(ZoneInfo(s.timezone)):%H:%M}"
+        slot = self.next_digest_slot(datetime.now(UTC))
+        return f"{slot.astimezone(ZoneInfo(self.settings.timezone)):%H:%M}"
+
+    def _start_text(self) -> str:
+        live = [p for p, src in self.settings.sources.items() if src.enabled]
+        return format_start(self._next_digest(), live, self.digest_when())
+
+    async def digest_tick(self, send: Any, now: datetime | None = None) -> int | None:
+        """Пора по расписанию — список новых через `send`; не пора — None. Первый запуск
+        только запоминает время: список придёт в ближайший слот, а не при старте."""
+        now = now or datetime.now(UTC)
+        last = self.storage.get_flag(DIGEST_LAST_FLAG)
+        if not last:
+            self.storage.set_flag(DIGEST_LAST_FLAG, now.isoformat())
+            return None
+        if self.next_digest_slot(datetime.fromisoformat(last)) > now:
+            return None
+        self.storage.set_flag(DIGEST_LAST_FLAG, now.isoformat())
+        return await self.send_digest(send)
 
     async def status(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
@@ -398,11 +454,18 @@ class BotHandlers:
         await self._reply(update, format_filters(self.pipeline.scoring_settings()))
 
     async def learned(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Правила из отметок владельца (ADR 0013): что запомнил и кнопки «забыть»."""
+        """Правила из отметок владельца (ADR 0013): что запомнил и кнопки «забыть»; у
+        пользователя анкеты — его отметки под списком вакансий (ADR 0018)."""
+        if self._is_public(update):
+            return await self.onboarding.learned(update, context)
         if not self._is_owner(update):
             return await self._deny(update)
-        lessons = self.storage.lessons(self.pipeline.owner_key)
-        await self._reply(update, format_lessons(lessons), _markup(lessons_keyboard(lessons)))
+        lessons = self.pipeline.lessons()
+        await self._reply(
+            update,
+            format_lessons(lessons, scope=self.pipeline.lesson_scope),
+            _markup(lessons_keyboard(lessons)),
+        )
 
     async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
@@ -438,13 +501,20 @@ class BotHandlers:
             )
 
     async def send_digest(self, send: Any) -> int:
-        """Новые (queued) заказы списком через `send(text, keyboard)`; после доставки они
-        больше не новые. Возвращает, сколько прислано."""
-        candidates = self.pipeline.digest_items()
-        if not candidates:
+        """Новые (queued) заказы списком через `send(text, keyboard)` — не больше DIGEST_LIMIT,
+        остальные ждут следующего списка; доставленные больше не новые. Возвращает, сколько
+        прислано."""
+        queued = self.pipeline.digest_items()
+        if not queued:
             return 0
+        candidates = queued[:DIGEST_LIMIT]
+        rest = len(queued) - len(candidates)
         title = DIGEST_TITLE.format(count=len(candidates))
-        for text, keyboard in await self._pages(candidates, title):
+        pages = await self._pages(candidates, title)
+        if rest:
+            text, keyboard = pages[-1]
+            pages[-1] = (f"{text}\n\n{DIGEST_MORE.format(rest=rest, all=MENU_ALL)}", keyboard)
+        for text, keyboard in pages:
             await send(text, keyboard)
         self.pipeline.mark_notified([p for p, _ in candidates])
         return len(candidates)
@@ -535,8 +605,8 @@ class BotHandlers:
         key = f"{platform}:{external_id}"
         markup = InlineKeyboardMarkup(
             [
-                [InlineKeyboardButton(f"🔗 Открыть вакансию на {PLATFORM_NAMES[platform]}",
-                                      url=p.url)],  # fmt: skip
+                [InlineKeyboardButton(vacancy_link_label(p), url=p.url)],
+                [InlineKeyboardButton(BUTTON_LETTER, callback_data=f"letter:{key}")],
                 [
                     InlineKeyboardButton(BUTTON_APPLIED, callback_data=f"applied:{key}"),
                     InlineKeyboardButton(BUTTON_SKIP, callback_data=f"skip:{key}"),
@@ -589,7 +659,7 @@ class BotHandlers:
         try:
             await bot.send_message(
                 chat_id=self.settings.owner_id,
-                text=format_start(self._next_digest()),
+                text=self._start_text(),
                 parse_mode=ParseMode.HTML,
                 reply_markup=MENU_MARKUP,
             )
@@ -655,6 +725,8 @@ class BotHandlers:
             return
         if action.startswith("nf-"):
             return await self._learn(query, action.removeprefix("nf-"), p)
+        if action == "letter":
+            return await self._letter(query, p)
         if action == "pick":
             await query.answer("Готовлю отклик…" if platform not in VACANCY_PLATFORMS else None)
             await self._respond(query.message, platform, external_id)
@@ -696,6 +768,53 @@ class BotHandlers:
             changes = learned[0] if learned else []
             await query.message.reply_text(format_applied(p, changes), parse_mode=ParseMode.HTML)
 
+    def _applicant(self) -> Applicant | None:
+        """Кто откликается: резюме пройденной анкеты, без неё — profile.toml владельца."""
+        data = completed_anketa(self.storage, self.settings.owner_id)
+        if data and (applicant := applicant_from_anketa(data)):
+            return applicant
+        profile = getattr(getattr(self.pipeline, "drafter", None), "profile", None)
+        return applicant_from_profile(profile) if profile is not None else None
+
+    async def _letter(self, query: Any, p: Project) -> None:
+        """Письмо к вакансии; повторное нажатие — другой вариант (прошлый — образец, чего не
+        повторять)."""
+        applicant = self._applicant()
+        if applicant is None:
+            return await query.answer("Нет резюме: пройдите анкету — /signup", show_alert=True)
+        await query.answer("Пишу письмо…")  # сразу: нейросеть думает дольше, чем ждёт Telegram
+        flag = LETTER_FLAG.format(platform=p.platform, external_id=p.external_id)
+        try:
+            last = json.loads(self.storage.get_flag(flag) or "{}")
+        except ValueError:
+            last = {}
+        variant = int(last.get("n", -1)) + 1
+        async with _typing(query.message):
+            letter = await self.letters.write(p, applicant, variant, last.get("text"))
+        self.storage.set_flag(flag, json.dumps({"n": variant, "text": letter.text},
+                                               ensure_ascii=False))  # fmt: skip
+        key = f"{p.platform}:{p.external_id}"
+        markup = InlineKeyboardMarkup(
+            [
+                [InlineKeyboardButton(vacancy_link_label(p), url=p.url)],
+                [InlineKeyboardButton(BUTTON_LETTER_AGAIN, callback_data=f"letter:{key}")],
+                [
+                    InlineKeyboardButton(BUTTON_APPLIED, callback_data=f"applied:{key}"),
+                    InlineKeyboardButton(BUTTON_NOFIT, callback_data=f"nofit:{key}"),
+                ],
+            ]
+        )
+        text = format_letter(p, letter.text, letter.generator, variant)
+        data = completed_anketa(self.storage, self.settings.owner_id) or {}
+        if data.get("resume_name"):  # ФИО анкеты и резюме разные (onboarding.name_conflict)
+            text += "\n\n" + LETTER_NAME_NOTE.format(name=html.escape(data["resume_name"]))
+        await query.message.reply_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=markup,
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+
     async def _learn(self, query: Any, reason: str, p: Project) -> None:
         """Причина «не подходит» → правило; нечего запомнить — подсказка, кнопки остаются."""
         learned = self.pipeline.learn(reason, p.platform, p.external_id)
@@ -710,17 +829,17 @@ class BotHandlers:
 
     async def _unlearn(self, query: Any, which: str) -> None:
         """Кнопка в /learned: забыть одно правило или все; список обновляется на месте."""
-        key = self.pipeline.owner_key
+        key, scope = self.pipeline.owner_key, self.pipeline.lesson_scope
         if which == "all":
-            self.storage.clear_lessons(key)
+            self.storage.clear_lessons(key, scope)
             await query.answer("Забыл все отметки")
         elif which.isdigit() and self.storage.delete_lesson(key, int(which)):
             await query.answer("Забыл")
         else:
             return await query.answer("Это правило уже снято")
-        lessons = self.storage.lessons(key)
+        lessons = self.storage.lessons(key, scope)
         await query.edit_message_text(
-            format_lessons(lessons),
+            format_lessons(lessons, scope=scope),
             parse_mode=ParseMode.HTML,
             reply_markup=_markup(lessons_keyboard(lessons)),
         )
@@ -772,17 +891,11 @@ def build_application(settings: Settings, storage: Storage, pipeline: Pipeline) 
                     first=5,
                     name=f"collect:{platform}",
                 )
-        if settings.digest_enabled:
-            first = next_digest_at(
-                datetime.now(UTC),
-                settings.timezone,
-                settings.digest_start_hour,
-                settings.digest_interval_min,
-            )
+        if settings.digest_enabled:  # время списка — по расписанию (digest_tick)
             app.job_queue.run_repeating(
                 _make_digest_job(handlers, pipeline),
-                interval=settings.digest_interval_min * 60,
-                first=first,
+                interval=DIGEST_TICK_SEC,
+                first=DIGEST_TICK_SEC,
                 name="digest",
             )
     return app
@@ -792,9 +905,9 @@ def _make_digest_job(handlers: BotHandlers, pipeline: Pipeline):
     async def job(context: ContextTypes.DEFAULT_TYPE) -> None:
         if handlers.storage.get_flag("paused") == "1":
             return  # новые копятся и придут после /resume
-        notifier = pipeline.notifier
-        sent = await handlers.send_digest(notifier.send_card)
-        log.info("дайджест: прислано %d", sent)
+        sent = await handlers.digest_tick(pipeline.notifier.send_card)
+        if sent is not None:
+            log.info("дайджест: прислано %d", sent)
 
     return job
 

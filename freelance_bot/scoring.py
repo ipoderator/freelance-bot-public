@@ -15,6 +15,7 @@ import re
 from collections.abc import Iterable
 from datetime import datetime
 
+from freelance_bot import fit as resume_fit
 from freelance_bot import learning
 from freelance_bot.config import Settings
 from freelance_bot.experience import required_years, years_word
@@ -325,9 +326,12 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
     # отметки пользователя (ADR 0013): «не моя тема», «офис», «откликнулся»…
     lessons = learning.apply(p, settings.lessons)
     reasons.extend(lessons.reasons)
+    # смысл должности под резюме анкеты (ADR 0018): сфера, специализация, уровень
+    fit = resume_fit.apply(title, str(p.extra.get("company") or ""), settings.fit)
+    reasons.extend(fit.reasons)
 
     total = relevance + bonus + freshness + budget + offers + hired_adjust - penalty
-    score = max(0, min(100, round(total + lessons.points)))
+    score = max(0, min(100, round(total + lessons.points + fit.points)))
 
     # отсечение
     excluded: str | None = None
@@ -362,6 +366,8 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
             excluded = _EXCLUSION_LABELS[MILITARY_KEY]
         elif lessons.excluded:
             excluded = lessons.excluded
+        elif fit.excluded:
+            excluded = fit.excluded
         elif (php_in_title and not profile_in_title) or (
             php_points >= MIN_STOP_POINTS and php_outweighs
         ):

@@ -490,6 +490,7 @@ async def test_digest_job_skips_pause_and_sends_via_notifier(env, make_project):
     assert notifier.cards == [] and env.storage.get_status("fl", "89") == "queued"
 
     env.storage.set_flag("paused", "0")
+    env.storage.set_flag("digest_last_at", "2000-01-01T00:00:00+00:00")  # слот давно прошёл
     await job(None)
     assert len(notifier.cards) == 1 and notifier.cards[0][1][0][0][1] == "pick:fl:89"
     assert env.storage.get_status("fl", "89") == "notified"
@@ -786,16 +787,17 @@ async def test_pick_vacancy_sends_card_with_link_and_no_draft(env, make_project)
 
     reply = message.replies[0]
     assert reply.startswith("💼 <b>Python-разработчик (FastAPI)</b>\n🏢 Ромашка · 📍 Москва")
-    assert "💵 зарплата: от 150 000 ₽" in reply and "Отклик на вакансию — на hh.ru" in reply
+    assert "💵 зарплата: от 150 000 ₽" in reply and "«✉️ Письмо работодателю»" in reply
     rows = message.markups[0].inline_keyboard
     assert rows[0][0].url == "https://my.hh.ru/b/test001"
-    assert [b.callback_data for b in rows[1]] == ["applied:hh:t1", "skip:hh:t1"]
+    assert [b.callback_data for b in rows[1]] == ["letter:hh:t1"]
+    assert [b.callback_data for b in rows[2]] == ["applied:hh:t1", "skip:hh:t1"]
     assert env.storage.latest_response("hh", "t1") is None  # черновик не создавался
 
     for action in ("offer", "redraft"):
         update, message, query = update_from(OWNER, f"{action}:hh:t1")
         await env.handlers.button(update, None)
-        assert "отклики не готовит" in query.answers[0] and message.replies == []
+        assert "Письмо работодателю" in query.answers[0] and message.replies == []
     assert env.storage.get_flag(AWAITING_OFFER_FLAG) in (None, "")
 
 
@@ -934,3 +936,125 @@ async def test_filters_and_menu_tell_how_learning_works(env):
     update, message, _ = update_from(OWNER)
     await env.handlers.menu(update, None)
     assert "👎 Не подходит" in message.replies[0] and "🧠 Обучение" in message.replies[0]
+
+
+async def test_letter_button_writes_letter_then_another(env, make_project):
+    """«✉️ Письмо работодателю»: без анкеты — по profile.toml; повторно — другой вариант."""
+    from freelance_bot.profile import load_profile
+
+    _vacancy(make_project, env)
+    update, message, query = update_from(OWNER, "letter:hh:t1")
+    await env.handlers.button(update, None)  # ни анкеты, ни профиля — писать не из чего
+    assert "Нет резюме" in query.answers[0] and message.replies == []
+
+    env.handlers.pipeline.drafter.profile = load_profile(ROOT / "profile/profile.example.toml")
+    update, message, query = update_from(OWNER, "letter:hh:t1")
+    await env.handlers.button(update, None)
+    assert query.answers[0] == "Пишу письмо…"
+    first = message.replies[0]
+    assert first.startswith("✉️ <b>Письмо:</b> Python-разработчик (FastAPI)")
+    assert "<pre>Здравствуйте!" in first and "шаблон по вашему резюме" in first
+    rows = message.markups[0].inline_keyboard
+    assert rows[0][0].url == "https://my.hh.ru/b/test001"
+    assert rows[1][0].text == "🔄 Другое письмо" and rows[1][0].callback_data == "letter:hh:t1"
+
+    update, message, query = update_from(OWNER, "letter:hh:t1")
+    await env.handlers.button(update, None)
+    second = message.replies[0]
+    assert second.startswith("🔄 <b>Письмо, вариант 2:</b>") and second != first
+
+
+# ── проверка 2026-10-25: расписание и размер списка новых ────────────────────────────
+
+
+def _owner_anketa(storage, schedule):
+    storage.save_user(OWNER, "done", {"full_name": "Иванов Иван", "schedule": schedule,
+                                      "platforms": ["fl"], "directions": ["backend"]},
+                      consent=True, completed=True)  # fmt: skip
+
+
+async def test_owner_digest_follows_anketa_schedule(env):
+    """В анкете «в 10:00 и 18:00» — список в 21:00 не приходит, приходит в 10:00."""
+    _owner_anketa(env.storage, {"times": ["10:00", "18:00"]})
+    h = env.handlers
+    sent = []
+
+    async def send(text, keyboard):
+        sent.append(text)
+
+    msk = lambda hour, day=25: datetime(2026, 10, day, hour - 3, 0, tzinfo=UTC)  # noqa: E731
+    assert await h.digest_tick(send, msk(18) + timedelta(minutes=5)) is None  # первый раз
+    assert await h.digest_tick(send, msk(21)) is None  # не по расписанию анкеты
+    assert await h.digest_tick(send, msk(10, 26)) == 0  # пора: в очереди пусто
+    assert await h.digest_tick(send, msk(10, 26) + timedelta(minutes=1)) is None
+    assert h.digest_when() == "в 10:00 и 18:00"
+
+
+async def test_digest_without_anketa_uses_settings_grid(env):
+    h = env.handlers
+    env.storage.set_flag("digest_last_at", datetime(2026, 10, 25, 8, 5, tzinfo=UTC).isoformat())
+
+    async def send(text, keyboard): ...
+
+    assert await h.digest_tick(send, datetime(2026, 10, 25, 8, 50, tzinfo=UTC)) is None
+    assert await h.digest_tick(send, datetime(2026, 10, 25, 9, 0, tzinfo=UTC)) == 0
+    assert h.digest_when() == "раз в час"
+
+
+async def test_digest_is_capped_and_rest_waits(env, make_project):
+    from freelance_bot.bot import DIGEST_LIMIT
+
+    for i in range(DIGEST_LIMIT + 5):
+        env.storage.upsert_project(make_project(external_id=str(100 + i),
+                                                url=f"https://www.fl.ru/projects/{100 + i}/"))
+        env.storage.set_status("fl", str(100 + i), "queued")
+    pages = []
+
+    async def send(text, keyboard):
+        pages.append((text, keyboard))
+
+    assert await env.handlers.send_digest(send) == DIGEST_LIMIT
+    text = "\n".join(t for t, _ in pages)
+    assert f"Новые заказы</b> — {DIGEST_LIMIT}" in text
+    assert "Ещё новых: 5 — пришлю в следующем списке" in pages[-1][0]
+    assert len(env.storage.projects_with_status("queued", NOW - timedelta(days=7))) == 5
+    assert await env.handlers.send_digest(send) == 5
+
+
+def test_menu_names_live_sources_and_schedule():
+    from freelance_bot.telegram_ui import format_start
+
+    text = format_start("10:00", ["fl", "work24", "superjob", "trudvsem", "tgchannels"],
+                        "в 10:00 и 18:00")  # fmt: skip
+    assert "заказы на FL.ru и Work24 и вакансии (SuperJob, Работа России и Telegram-каналы)" in text
+    assert "Kwork" not in text and "Freelance.ru" not in text
+    assert "⏰ Новые присылаю сам в 10:00 и 18:00, следующий список — 10:00." in text
+    assert "цену со сроком для формы" not in text
+
+
+def test_vacancy_list_hint_has_no_price(make_project):
+    from freelance_bot.telegram_ui import format_offer_list
+
+    vacancy = make_project(platform="superjob", external_id="1", extra={"area": "Липецк"})
+    text = format_offer_list([(vacancy, 50)], "Europe/Moscow")
+    assert "письмом работодателю" in text and "готовый отклик" not in text
+    mixed = format_offer_list([(vacancy, 50), (make_project(), 50)], "Europe/Moscow")
+    assert "к вакансии — письмо работодателю" in mixed
+
+
+async def test_owner_lessons_belong_to_his_resume(env, make_project):
+    """Отметка владельца при пройденной анкете — для её резюме; без анкеты — profile.toml."""
+    env.storage.save_user(OWNER, "done", {
+        "full_name": "Иванов Иван", "directions": [], "platforms": ["superjob"],
+        "profile": {"profession": "Повар", "city": "Воронеж", "experience_years": 3},
+    }, consent=True, completed=True)  # fmt: skip
+    p = make_project(platform="superjob", external_id="9", title="Повар",
+                     extra={"area": "Воронеж", "company": "Кафе"})  # fmt: skip
+    env.storage.upsert_project(p)
+    update, message, query = update_from(OWNER, callback_data="nf-company:superjob:9")
+    await env.handlers.button(update, None)
+    assert [x.value for x in env.storage.lessons(OWNER, "Повар")] == ["кафе"]
+    assert env.storage.lessons(OWNER) == []
+    update, message, _ = update_from(OWNER, text="/learned")
+    await env.handlers.learned(update, None)
+    assert "Для резюме «Повар»" in message.replies[0] and "кафе" in message.replies[0]

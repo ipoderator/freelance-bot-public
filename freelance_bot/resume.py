@@ -140,6 +140,13 @@ _CITY_LABEL_RE = re.compile(
 _CITY_RE = re.compile(r"[А-ЯЁ][а-яё]+(?:[- ][А-ЯЁа-яё][а-яё]+){0,2}")
 _NAME_RE = re.compile(r"(?:[А-ЯЁA-Z][а-яёa-z]+(?:-[А-ЯЁA-Z][а-яёa-z]+)?|[А-ЯЁA-Z-]{2,})"
                       r"(?:\s+(?:[А-ЯЁA-Z][а-яёa-z]+|[А-ЯЁA-Z-]{2,})){1,2}")  # fmt: skip
+# Место работы с одним годом: «2020 (сезонно)», «лето 2019» — строкой под должностью
+_SINGLE_YEAR_RE = re.compile(
+    r"^[ \t]*(?:(лето|зима|весна|осень)\s+)?((?:19|20)\d{2})(?:\s*г\.?)?"
+    r"(?:\s*\(([^)\n]{1,30})\))?[ \t]*$",
+    re.IGNORECASE | re.MULTILINE,
+)
+SEASON_MONTHS = 3  # сезонная работа за год — лето, а не весь год
 _EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
 _PHONE_RE = re.compile(r"\+?\d[\d \t()-]{8,}\d")
 _SENTENCE_RE = re.compile(r"[.!?]\s+[А-ЯЁA-Z]")
@@ -184,6 +191,8 @@ class ResumeProfile:
     skills: list[str] = field(default_factory=list)
     education: list[str] = field(default_factory=list)
     jobs: list[str] = field(default_factory=list)  # «Повар — Кафе «Тёплый хлеб» (2023–н.в.)»
+    # Смежные должности, которые человек дописал сам («✏️ Профессия» в анкете)
+    roles: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -200,6 +209,7 @@ class ResumeProfile:
             skills=list(raw.get("skills", [])),
             education=list(raw.get("education", [])),
             jobs=list(raw.get("jobs", [])),
+            roles=list(raw.get("roles", [])),
             facts=[ResumeFact(**f) for f in raw.get("facts", [])],
             generator=raw.get("generator", "builtin"),
         )
@@ -509,23 +519,40 @@ def _title_after(tail: str) -> str:
     return ""
 
 
+def _single_years(text: str, sections: list[tuple[int, int, str, str]]) -> list[re.Match[str]]:
+    """Строки «2020 (сезонно)» в разделе опыта: место работы без периода."""
+    return [m for m in _SINGLE_YEAR_RE.finditer(text) if _section_at(sections, m.start()) == "work"]
+
+
+def _span(m: re.Match[str], now: int) -> tuple[int | None, int | None]:
+    """Начало и конец места работы в месяцах: период или один год (сезон — SEASON_MONTHS)."""
+    if m.re is _SINGLE_YEAR_RE:
+        year = int(m.group(2)) * 12
+        seasonal = bool(m.group(1)) or "сезон" in (m.group(3) or "").casefold()
+        return (year + 5, year + 4 + SEASON_MONTHS) if seasonal else (year, year + 11)
+    start = _month(*m.group(1, 2, 3, 4, 5))
+    end = now if m.group(11) else _month(*m.group(6, 7, 8, 9, 10))
+    if m.group(10) and start is not None and end is not None:
+        end = end - 1 if end - 1 >= start else end + 11  # «2022–2026» — четыре года
+    return start, end
+
+
 def work_periods(text: str, today: date) -> list[Job]:
     """Места работы с периодами; периоды в разделах учёбы и курсов пропускаются. Должность
     стоит над периодом («Повар — Кафе» / «2023–н.в.») или, как в hh.ru, под ним — вид
-    выбирается по первому месту работы, чтобы должность не уехала к соседнему месту."""
+    выбирается по первому месту работы, чтобы должность не уехала к соседнему месту.
+    В разделе опыта место работы может стоять и с одним годом: «2020 (сезонно)»."""
     now = today.year * 12 + today.month - 1
     sections = _sections(text)
-    matches = list(_PERIOD_RE.finditer(text))
+    matches = sorted([*_PERIOD_RE.finditer(text), *_single_years(text, sections)],
+                     key=lambda m: m.start())  # fmt: skip
     heads = [_title_before(text, m) for m in matches]
     above = bool(heads) and heads[0] is not None
     jobs = []
     for i, m in enumerate(matches):
         if _section_at(sections, m.start()) == "education":
             continue
-        start = _month(*m.group(1, 2, 3, 4, 5))
-        end = now if m.group(11) else _month(*m.group(6, 7, 8, 9, 10))
-        if m.group(10) and start is not None and end is not None:
-            end = end - 1 if end - 1 >= start else end + 11  # «2022–2026» — четыре года
+        start, end = _span(m, now)
         if start is None or end is None or not start <= end or start > now:
             continue
         stop = len(text)
@@ -541,6 +568,9 @@ def work_periods(text: str, today: date) -> list[Job]:
         else:
             title, body, role = ("" if above else _title_after(tail)), m.group(0) + tail, False
         period = " ".join(m.group(0).split())
+        if m.re is _SINGLE_YEAR_RE:  # «2020 (сезонно)» → «2020, сезонно»: в подписи свои скобки
+            year = " ".join(x for x in m.group(1, 2) if x)
+            period = ", ".join(x for x in (year, (m.group(3) or "").strip()) if x)
         jobs.append(Job(start, min(end, now), body, title[:MAX_TITLE_CHARS], period, role))
     return jobs
 
@@ -588,6 +618,23 @@ def profession(text: str, jobs: list[Job] | None = None) -> str:
         return lines[0]
     role = next((job.title for job in jobs or [] if job.role), "")
     return re.split(r"\s+[—–|-]\s+|,\s", role)[0][:MAX_TITLE_CHARS] if role else ""
+
+
+def person_name(text: str) -> str:
+    """ФИО из шапки резюме («Анна Фёдорова» первой строкой) — сверить с ФИО анкеты; не
+    похоже на имя — ""."""
+    for line in [line.strip() for line in text.splitlines() if line.strip()][:3]:
+        if line.casefold() in ("резюме", "cv", "resume"):
+            continue
+        return line if _NAME_RE.fullmatch(line) and not _is_heading_role(line) else ""
+    return ""
+
+
+def _is_heading_role(line: str) -> bool:
+    """«Продавец Консультант» с заглавных — тоже подходит под _NAME_RE; должность выдают
+    слова профессий."""
+    roles = (*IT_ROLE_TERMS, "менеджер", "специалист", "администратор", "продавец", "бухгалтер")
+    return bool(find_terms(line.casefold(), roles))
 
 
 def _is_heading(line: str) -> bool:

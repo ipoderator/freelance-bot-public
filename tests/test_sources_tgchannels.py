@@ -39,9 +39,15 @@ def test_page_gives_vacancies_and_skips_ads():
     assert cook.platform == "tgchannels" and cook.url == "https://t.me/rabota_perm/10738"
     assert cook.published_at == datetime(2026, 10, 23, 12, 39, 24, tzinfo=UTC)
     assert cook.budget_min == cook.budget_max == 280000 and cook.extra["salary"] == "280 000 ₽"
-    assert cook.extra["area"] == "Пермь" and cook.description.startswith("Обязанности:")
-    assert found[2].budget_min is None
-    assert found[2].extra["salary"] == "Зарплата по договоренности"
+    assert cook.extra == {"area": "Пермь", "salary": "280 000 ₽", "channel": "rabota_perm"}
+    assert cook.description.startswith("Обязанности: Организация, приготовление и выдача")
+    assert found[2].budget_min is None and found[2].extra["salary"] == "по договорённости"
+    sales = found[1].description.split("\n")  # пункты раздела — одной строкой, без «•»
+    assert sales[0] == ("Обязанности: Поддерживать высокий уровень сервиса и продаж; Общаться "
+                        "с покупателями, находить к ним подход; Ухаживать за животными; "
+                        "Поддерживать порядок в магазине.")  # fmt: skip
+    assert [line.split(":")[0] for line in sales] == ["Обязанности", "Требования",
+                                                      "Мы предлагаем"]  # fmt: skip
 
 
 def test_contacts_are_not_copied():
@@ -66,7 +72,8 @@ def test_inline_contacts_and_latin_letters():
 
 def test_post_without_salary_line_and_not_a_vacancy():
     p = parse_post(["Грузчик", "Требования:", "• Без опыта"], "c", "1", "Пермь", WHEN)
-    assert p is not None and p.extra == {"area": "Пермь"} and p.description.startswith("Треб")
+    assert p is not None and p.extra == {"area": "Пермь", "channel": "c"}
+    assert p.description == "Требования: Без опыта."
     assert parse_post(["Служба по контракту", "Выплаты до 4 500 000 ₽"], "c", "2", "Пермь",
                       WHEN) is None  # fmt: skip
 

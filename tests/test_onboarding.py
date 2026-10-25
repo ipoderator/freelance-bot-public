@@ -26,6 +26,7 @@ from freelance_bot.onboarding import (
     NAME_TEXT,
     PUBLIC_HELP,
     RESUME_LIMIT,
+    STALE_TEXT,
     address_options,
     first_matches,
     format_profile,
@@ -228,7 +229,9 @@ async def test_full_flow_with_pasted_resume(env):
     ]
     assert "Петров Пётр Петрович" in env.storage.users()[0].data["full_name"]
     assert len(replies) == 2 and replies[1].startswith(MATCHES_NONE)  # база пуста
-    assert "Новые будут приходить раз в час, 9:00–21:00 (МСК)" in replies[1]
+    # посторонним рассылки по расписанию ещё нет — так и сказано, со ссылкой на кнопку
+    assert "Сам присылать новые раз в час, 9:00–21:00 (МСК) начну, когда включим" in replies[1]
+    assert "«🔎 Заказы по анкете» в /start" in replies[1]
 
 
 def _project(platform, external_id, title, hours_ago, description=""):
@@ -306,7 +309,7 @@ async def test_matches_button_lists_all_and_owner_gets_own_hh(env):
     text = "\n".join(pages)
     assert "Заказы и вакансии под вашу анкету</b> — 20" in pages[0] and "<b>20.</b>" in pages[-1]
     assert "/hh/vac" not in text  # подборка HH владельца посторонним не видна
-    assert "Новые будут приходить" in pages[-1]
+    assert "когда включим рассылку" in pages[-1]
     assert guest.last_query.markup == "unchanged"  # кнопку можно нажать ещё раз
 
     owner = Chat(env.handlers, OWNER)
@@ -504,7 +507,7 @@ async def test_stale_button_repeats_current_question(env):
     await chat.command("start")
     await chat.press("ob:agree")
     replies = await chat.press("ob:plat_done")  # кнопка не этого шага
-    assert replies == [NAME_TEXT]
+    assert replies == [STALE_TEXT, NAME_TEXT]
 
 
 async def test_restart_and_forget(env):
@@ -632,7 +635,7 @@ async def test_cook_resume_gets_cook_vacancies_in_own_city(env):
 
     asked = []
 
-    async def search(data):
+    async def search(data, **_):
         asked.append(data["profile"]["profession"])
         return [
             vacancy("v1", "Повар-универсал в столовую"),
@@ -667,7 +670,7 @@ async def test_cook_resume_gets_cook_vacancies_in_own_city(env):
 async def test_search_failure_keeps_collected_matches(env):
     env.storage.upsert_project(_project("fl", "1", "Бэкенд на Python и FastAPI", 1))
 
-    async def broken(data):
+    async def broken(data, **_):
         raise RuntimeError("SuperJob не ответил")
 
     env.handlers.onboarding.search = broken
@@ -680,7 +683,7 @@ async def test_no_vacancies_in_city_is_said_plainly(env):
         encoding="utf-8"
     )
 
-    async def nothing(data):
+    async def nothing(data, **_):
         return []
 
     env.handlers.onboarding.search = nothing
@@ -691,7 +694,9 @@ async def test_no_vacancies_in_city_is_said_plainly(env):
     await chat.press("ob:plat_done")
     await chat.press("ob:loc_done")
     replies = await chat.press("ob:freq:hourly")
-    assert "В городе Елец на SuperJob сейчас нет вакансий «Уборщик помещений»" in replies[1]
+    assert "Вакансий «Уборщик помещений» под ваш стаж сейчас нет. Искал: Елец и удалённые." in (
+        replies[1]
+    )
 
 
 async def test_signup_asks_about_other_cities_and_remote(env):
@@ -703,7 +708,7 @@ async def test_signup_asks_about_other_cities_and_remote(env):
         return replace(_project("superjob", vid, "Повар", 2, "Обязанности: повар"),
                        extra={"area": area})  # fmt: skip
 
-    async def search(data):
+    async def search(data, **_):
         return [vacancy("near", "Воронеж"), vacancy("far", "Москва"),
                 vacancy("home", "Воронеж, удалённо")]  # fmt: skip
 
@@ -742,3 +747,216 @@ async def test_signup_asks_about_other_cities_and_remote(env):
     assert user.step == "done" and user.completed_at == done_at and "editing" not in user.data
     pages = await chat.press("ob:matches")
     assert "/superjob/home" in pages[0] and "/superjob/far" not in pages[0]
+
+
+# ── проверка 2026-10-25: отметки пользователя, смена резюме, ФИО, профессия ─────────────
+
+COOK = (ROOT / "tests" / "fixtures" / "resumes" / "08_cook.txt").read_text(encoding="utf-8")
+ACCOUNTANT = (ROOT / "tests" / "fixtures" / "resumes" / "07_accountant.txt").read_text(
+    encoding="utf-8"
+)
+
+
+def _cook_vacancy(vid, title, company="Кафе «Ромашка»"):
+    p = _project("superjob", vid, title, 2, f"Обязанности: {title}")
+    return replace(p, extra={"area": "Воронеж", "company": company})
+
+
+async def _cook_signup(env, chat, vacancies):
+    async def search(data, **_):
+        return list(vacancies)
+
+    env.handlers.onboarding.search = search
+    await _to_resume_step(chat)
+    await chat.say(COOK)
+    await chat.press("ob:ok")
+    await chat.press("ob:plat_done")
+    await chat.press("ob:loc_done")
+    return await chat.press("ob:freq:hourly")
+
+
+def _press_under(chat, data, markup):
+    """Нажатие кнопки под сообщением с этой клавиатурой (у Query — reply_markup сообщения)."""
+    message = Message()
+    message.reply_markup = markup
+    query = Query(data, message)
+    query.edited = []
+
+    async def edit_message_text(text, **kwargs):
+        query.edited.append(text)
+
+    query.edit_message_text = edit_message_text
+    chat.last_query = query
+    return message, query
+
+
+async def test_guest_marks_vacancies_and_teaches_own_matching(env):
+    """Обычный пользователь: под списком «✅ Откликнулся» и «👎 Не подходит», отметки и
+    правила — его, другим не мешают; отмеченное в список больше не попадает."""
+    vacancies = [_cook_vacancy("v1", "Повар горячего цеха"),
+                 _cook_vacancy("v2", "Повар", "Столовая «Линия»"),
+                 _cook_vacancy("v3", "Повар-универсал", "Столовая «Линия»")]  # fmt: skip
+    chat = Chat(env.handlers, GUEST)
+    replies = await _cook_signup(env, chat, vacancies)
+    assert "✅ — откликнулся, 👎 — не подходит" in replies[1]
+    list_markup = chat.last_markup
+    buttons = [b.callback_data for row in list_markup.inline_keyboard for b in row]
+    assert "ob:ap:superjob:v1" in buttons and "ob:nf:superjob:v2" in buttons
+
+    message, query = _press_under(chat, "ob:ap:superjob:v1", list_markup)
+    await env.handlers.button(chat._update(message, query), None)
+    assert "✅ Записал: вы откликнулись на «Повар горячего цеха»" in message.replies[0]
+    left = [b.callback_data for row in query.markup.inline_keyboard for b in row]
+    assert "ob:ap:superjob:v1" not in left and "ob:ap:superjob:v2" in left  # строка убрана
+
+    await chat.press("ob:nf:superjob:v2")
+    assert "Чем не подходит «Повар»?" in chat.replies[-1]
+    assert ("🚫 Компания", "ob:nr:company:superjob:v2") in chat.buttons()
+    await chat.press("ob:nr:company:superjob:v2")
+    assert "вакансии компании «столовая «линия»» не присылаю" in chat.replies[-1]
+    assert "/learned" in chat.replies[-1]
+
+    scope = "Повар горячего цеха"
+    assert [x.kind for x in env.storage.lessons(GUEST, scope)] == ["company"]
+    assert env.storage.lessons(OWNER, scope) == [] and env.storage.lessons(GUEST) == []
+    learned = (await chat.command("learned"))[-1]
+    assert "Для резюме «Повар горячего цеха»" in learned and "столовая" in learned
+
+    await chat.command("start")
+    pages = await chat.press("ob:matches")
+    text = "\n".join(pages)
+    assert "/superjob/v1" not in text  # откликнулся
+    assert "/superjob/v2" not in text and "/superjob/v3" not in text  # компания в стоп-листе
+
+    other = Chat(env.handlers, GUEST + 1)  # другой человек — свой список, без чужих правил
+    replies = await _cook_signup(env, other, vacancies)
+    assert all(f"/superjob/{v}" in replies[1] for v in ("v1", "v2", "v3"))
+    assert env.storage.lessons(GUEST + 1, scope) == []
+    assert env.storage.closed_marks(GUEST + 1) == set()
+
+
+async def test_guest_forgets_rule_in_learned(env):
+    chat = Chat(env.handlers, GUEST)
+    await _cook_signup(env, chat, [_cook_vacancy("v1", "Повар")])
+    await chat.press("ob:nf:superjob:v1")
+    await chat.press("ob:nr:company:superjob:v1")
+    await chat.command("learned")
+    [lesson] = env.storage.lessons(GUEST, "Повар горячего цеха")
+    assert ("✖ 1", f"ob:ul:{lesson.id}") in chat.buttons()
+    message, query = _press_under(chat, f"ob:ul:{lesson.id}", chat.last_markup)
+    await env.handlers.button(chat._update(message, query), None)
+    assert env.storage.lessons(GUEST, "Повар горячего цеха") == []
+    assert "Пока отметок нет" in query.edited[0]
+
+
+async def test_gone_vacancy_button_explains(env):
+    chat = Chat(env.handlers, GUEST)
+    await _cook_signup(env, chat, [])
+    await chat.press("ob:ap:superjob:nope")
+    assert "уже нет в вашем списке" in chat.last_query.alerts[0]
+
+
+async def test_new_resume_has_own_rules_and_says_so(env):
+    """Сменил резюме — правила прошлого не действуют и об этом сказано; вернулся — снова."""
+    chat = Chat(env.handlers, GUEST)
+    await _cook_signup(env, chat, [_cook_vacancy("v1", "Повар")])
+    await chat.press("ob:nf:superjob:v1")
+    await chat.press("ob:nr:company:superjob:v1")
+    await chat.command("start")
+    await chat.press("ob:restart")
+    await chat.say("Петров Пётр Петрович")
+    await chat.press("ob:addr:1")
+    review = (await chat.say(ACCOUNTANT))[-1]
+    assert "Отметки другого резюме («Повар горячего цеха»: 1) к этому не применяются" in review
+    data = env.storage.get_user(GUEST).data
+    found = first_matches(data, env.settings, env.storage, datetime.now(UTC), tg_id=GUEST)
+    assert found == []  # правил бухгалтера нет, вакансий тоже — но и чужие не мешают
+    assert len(env.storage.lessons(GUEST, "Повар горячего цеха")) == 1  # не удалены
+
+
+async def test_resume_with_other_name_is_flagged(env):
+    chat = Chat(env.handlers, GUEST)
+    await _to_resume_step(chat)  # ФИО анкеты — Петров Пётр Петрович
+    review = (await chat.say(COOK))[-1]  # в резюме — Ирина Белова
+    assert "⚠ В резюме ФИО «Ирина Белова», а в анкете — «Петров Пётр Петрович»" in review
+    assert env.storage.get_user(GUEST).data["resume_name"] == "Ирина Белова"
+    await chat.press("ob:reupload")
+    review = (await chat.say("Петров Пётр\n" + COOK.split("\n", 1)[1]))[-1]
+    assert "⚠" not in review and "resume_name" not in env.storage.get_user(GUEST).data
+
+
+async def test_accountant_edits_profession_not_it_directions(env):
+    chat = Chat(env.handlers, GUEST)
+    await _to_resume_step(chat)
+    await chat.say(ACCOUNTANT)
+    actions = [d for _, d in chat.buttons()]
+    assert "ob:prof" in actions and "ob:dirs" not in actions  # IT-направлений бухгалтеру нет
+    assert (await chat.press("ob:prof"))[0].startswith("Какую работу искать?")
+    assert await chat.say("1") == ["Нужна должность словами: 2–80 символов, до четырёх через "
+                                   "запятую."]  # fmt: skip
+    review = (await chat.say("Бухгалтер по первичной документации, помощник бухгалтера"))[-1]
+    assert "💼 Профессия: Бухгалтер по первичной документации" in review
+    assert "🔁 Смежные должности: помощник бухгалтера" in review
+    profile = env.storage.get_user(GUEST).data["profile"]
+    assert profile["roles"] == ["помощник бухгалтера"]
+    from freelance_bot.matching import search_queries
+    from freelance_bot.resume import ResumeProfile
+
+    assert "помощник бухгалтера" in search_queries(ResumeProfile.from_dict(profile))
+
+
+async def test_stale_button_after_signup_gives_fresh_menu(env):
+    chat = Chat(env.handlers, GUEST)
+    await _cook_signup(env, chat, [])
+    replies = await chat.press("ob:loc:other")  # кнопка шага, который уже пройден
+    assert replies[0] == STALE_TEXT and "💼 Профессия: Повар горячего цеха" in replies[1]
+    assert ("🔎 Заказы по анкете", "ob:matches") in chat.buttons()
+
+
+async def test_old_message_edit_error_does_not_break_button(env):
+    from telegram.error import BadRequest
+
+    chat = Chat(env.handlers, GUEST)
+    await chat.command("start")
+    message = Message()
+    query = Query("ob:agree", message)
+
+    async def edit_message_reply_markup(reply_markup=None):
+        raise BadRequest("Message is not modified")
+
+    query.edit_message_reply_markup = edit_message_reply_markup
+    await env.handlers.button(chat._update(message, query), None)
+    assert message.replies == [NAME_TEXT]
+
+
+async def test_empty_result_names_actual_search(env):
+    """Пусто — сказано, где искал (любой город и удалённые) и что ответили площадки."""
+
+    async def search(data, statuses=None, **_):
+        statuses.update({"superjob": "не ответила", "trudvsem": "найдено 3 до отбора"})
+        return []
+
+    env.handlers.onboarding.search = search
+    chat = Chat(env.handlers, GUEST)
+    await _to_resume_step(chat)
+    await chat.say(COOK)
+    await chat.press("ob:ok")
+    await chat.press("ob:plat_done")
+    await chat.press("ob:loc:other")
+    await chat.press("ob:loc_done")
+    replies = await chat.press("ob:freq:hourly")
+    assert "Искал: любой город и удалённые." in replies[1]
+    assert "Площадки: SuperJob — не ответила; Работа России — найдено 3 до отбора." in replies[1]
+    assert "В городе" not in replies[1]
+
+
+async def test_owner_mark_under_anketa_list_closes_his_vacancy(env):
+    """Владелец отметил «✅» под списком анкеты — и его собранная вакансия закрыта: в «Все
+    заказы» и дайджест она больше не попадёт."""
+    p = _cook_vacancy("v1", "Повар горячего цеха")
+    env.storage.upsert_project(p)
+    chat = Chat(env.handlers, OWNER)
+    await _cook_signup(env, chat, [])
+    await chat.press("ob:ap:superjob:v1")
+    assert env.storage.get_status("superjob", "v1") == "applied"
+    assert env.storage.closed_marks(OWNER) == {("superjob", "v1")}

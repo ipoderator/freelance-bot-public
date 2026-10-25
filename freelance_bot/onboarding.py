@@ -9,7 +9,12 @@ callback_data «ob:<действие>[:<значение>]».
 Сразу после анкеты присылаются первые заказы и вакансии под неё (first_matches): из уже
 собранных и живым поиском SuperJob по профессии и городу из резюме (matching.py, ADR 0014) —
 видно, что поиск работает; полный список — кнопка «Заказы по анкете» в /start. Рассылка по
-расписанию — следующий этап. Не разработчику IT-направления и биржи фриланса не предлагаются.
+расписанию — следующий этап. Не разработчику IT-направления и биржи фриланса не предлагаются:
+вместо направлений он правит профессию и смежные должности («✏️ Профессия»).
+
+Под списком — «✅ Откликнулся» и «👎 Не подходит» к каждой вакансии (ADR 0018): отметки
+хранятся у человека (Storage.user_marks), правила — для его текущего резюме (lessons.scope);
+/learned — что запомнил и «забыть».
 """
 
 from __future__ import annotations
@@ -25,11 +30,15 @@ from typing import Any
 
 from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from telegram.constants import ChatAction, ParseMode
+from telegram.error import BadRequest
 
+from freelance_bot import learning
 from freelance_bot.config import Settings
 from freelance_bot.matching import (
     OTHER_CITIES,
     REMOTE,
+    group_chains,
+    lesson_scope,
     location_choice,
     mismatch,
     rank,
@@ -47,15 +56,22 @@ from freelance_bot.resume import (
     fetch_link,
     find_link,
     normalize,
+    person_name,
 )
 from freelance_bot.schedule import PRESETS, Schedule, describe, parse_schedule
 from freelance_bot.scoring import DIRECTION_LABELS, score_project
 from freelance_bot.storage import Storage
 from freelance_bot.telegram_ui import (
+    BUTTON_APPLIED,
+    BUTTON_NOFIT,
     MAX_MESSAGE_LEN,
+    NOFIT_PROMPT,
     PLATFORM_NAMES,
     VACANCY_PLATFORMS,
+    format_learned,
+    format_lessons,
     format_offer_list,
+    lessons_keyboard,
     selection_reason,
 )
 
@@ -86,6 +102,7 @@ BUTTON_OWN_ADDRESS = "✏️ Свой вариант"
 BUTTON_NO_RESUME = "Без резюме — выберу направления"
 BUTTON_OK = "✅ Всё верно"
 BUTTON_DIRECTIONS = "✏️ Направления"
+BUTTON_PROFESSION = "✏️ Профессия"
 BUTTON_REUPLOAD = "📄 Другое резюме"
 BUTTON_EXPERIENCE = "✏️ Стаж"
 BUTTON_DONE = "Готово ➡️"
@@ -105,7 +122,7 @@ ADDRESS_TEXT = "Как к вам обращаться?"
 ADDRESS_CUSTOM_TEXT = "Напишите, как к вам обращаться (до 40 символов)."
 ADDRESS_ERROR = "Нужно 1–40 символов: буквы, пробел, дефис или точка."
 RESUME_TEXT = (
-    "{address}, пришлите резюме — я выделю направления, стек и стаж для поиска.\n\n"
+    "{address}, пришлите резюме — я выделю профессию, город, навыки и стаж для поиска.\n\n"
     f"• файлом: {FORMATS_HINT}, до {MAX_FILE_BYTES // 1024 // 1024} МБ;\n"
     "• ссылкой на Google Docs, Google Диск или Яндекс Диск;\n"
     "• или вставьте текст резюме сообщением.\n\n"
@@ -122,6 +139,13 @@ EXPERIENCE_TEXT = (
 )
 EXPERIENCE_ERROR = "Не понял. Напишите число лет (<code>1,5</code>) или «1 год 3 месяца»."
 DIRECTIONS_TEXT = "Какие заказы искать? Нажмите, чтобы включить или выключить."
+PROFESSION_TEXT = (
+    "Какую работу искать? Напишите должность, например <code>Бухгалтер по первичной "
+    "документации</code>. Смежные должности — через запятую: <code>Бухгалтер по первичной "
+    "документации, помощник бухгалтера</code>."
+)
+PROFESSION_ERROR = "Нужна должность словами: 2–80 символов, до четырёх через запятую."
+MAX_ROLES = 3
 DIRECTIONS_EMPTY = "Выберите хотя бы одно направление"
 PLATFORMS_TEXT = "Где искать? Нажмите, чтобы включить или выключить, или «Везде».{hh}"
 HH_NOTE = "\n\nHH.ru — вакансии, а не заказы; как его подключить, расскажу отдельно."
@@ -150,21 +174,46 @@ DONE_TEXT = (
     "/profile — анкета, /start — заполнить заново, /forget — удалить данные."
 )
 MATCHES_TITLE = "🔎 <b>Заказы и вакансии под вашу анкету</b> — {count}"
-MATCHES_HINT = "Поиск работает. Откликнуться — на площадке по ссылке."
+MATCHES_HINT = (
+    "Откликаться — на площадке по ссылке. Кнопки под списком: ✅ — откликнулся, 👎 — не "
+    "подходит; по отметкам я меняю подбор (/learned)."
+)
 MATCHES_NONE = (
     "🔎 Подходящих заказов и вакансий под анкету сейчас нет: ищу по профессии, стажу и "
     "городу из резюме. Можно добавить площадки или прислать другое резюме: /start → "
     "«Заполнить заново»."
 )
-MATCHES_NONE_CITY = (
-    "🔎 В городе {city} на SuperJob сейчас нет вакансий «{profession}» под ваш стаж. "
-    "Загляну снова, когда появятся."
+MATCHES_NONE_VACANCIES = (
+    "🔎 Вакансий «{profession}» под ваш стаж сейчас нет. Искал: {where}."
 )
-MATCHES_LATER = "Новые будут приходить {when} ({tz}), когда включим рассылку, — я напишу."
+MATCHES_LATER = (
+    "Сам присылать новые {when} ({tz}) начну, когда включим рассылку, — я напишу. Пока список "
+    "— кнопка «{button}» в /start."
+)
+MATCHES_LATER_OWNER = "Новые пришлю сам {when} ({tz}) — списком «Новые заказы»."
+APPLIED_TEXT = "✅ Записал: вы откликнулись на «{title}». В списке она больше не появится."
+APPLIED_LEARNED = "\n🧠 Похожие ({words}) теперь будут выше — /learned."
+GONE_TEXT = "Этой вакансии уже нет в вашем списке — откройте его заново: /start."
+STALE_TEXT = "Эта кнопка устарела — вот актуальная."
+NAME_CONFLICT = (
+    "⚠ В резюме ФИО «{resume}», а в анкете — «{anketa}». Письма работодателю подписываю "
+    "именем из анкеты. Резюме не ваше — «{reupload}»; ошибка в анкете — /start → «{restart}»."
+)
+PUBLIC_LEARNING_HOW = (
+    f"Под списком вакансий — «{BUTTON_NOFIT}»: выберите причину, и похожие станут приходить "
+    f"реже или совсем перестанут. «{BUTTON_APPLIED}» — похожие поднимутся выше."
+)
+OTHER_SCOPES = (
+    "🧠 Отметки другого резюме ({scopes}) к этому не применяются; вернётесь к нему — снова "
+    "заработают."
+)
 FORGET_TEXT = "Удалить анкету и выжимку из резюме? Это нельзя отменить."
 FORGOTTEN_TEXT = "Удалил всё, что знал о вас. Вернуться — /start."
 NOTHING_TEXT = "О вас ничего не сохранено. Начать — /start."
-PUBLIC_HELP = "Команды: /start — анкета, /profile — ваши данные, /forget — удалить данные."
+PUBLIC_HELP = (
+    "Команды: /start — анкета, /profile — ваши данные, /learned — чему я научился по вашим "
+    "отметкам, /forget — удалить данные."
+)
 
 Reply = Callable[[str, InlineKeyboardMarkup | None], Awaitable[Any]]
 Summarize = Callable[[Sequence[Project]], Awaitable[list[str]]]
@@ -184,11 +233,11 @@ def consent_text(settings: Settings) -> str:
         llm = ""
     sent = f" Текст резюме для разбора отправляется нейросети ({llm})." if llm else ""
     return (
-        "👋 Я ищу свежие заказы на фриланс-биржах под ваш профиль.\n\n"
+        "👋 Я ищу свежие вакансии и заказы на фриланс-биржах под ваш профиль.\n\n"
         "Для этого спрошу <b>ФИО</b>, <b>как к вам обращаться</b> и попрошу <b>резюме</b>. "
-        "Из резюме выделю направления, стек и стаж; сам файл не храню — только выжимку."
+        "Из резюме выделю профессию, город, навыки и стаж; сам файл не храню — только выжимку."
         f"{sent} Удалить всё о себе — команда /forget.\n\n"
-        "Согласны на обработку этих данных для подбора заказов?"
+        "Согласны на обработку этих данных для подбора вакансий и заказов?"
     )
 
 
@@ -243,14 +292,65 @@ def resume_markup() -> InlineKeyboardMarkup:
     return _markup([[_button(BUTTON_NO_RESUME, "noresume")]])
 
 
-def review_markup() -> InlineKeyboardMarkup:
+def review_markup(by_profession: bool = False) -> InlineKeyboardMarkup:
+    """Не разработчику — правка профессии, а не IT-направлений владельца."""
+    edit = _button(BUTTON_PROFESSION, "prof") if by_profession else _button(BUTTON_DIRECTIONS,
+                                                                            "dirs")  # fmt: skip
     return _markup(
         [
             [_button(BUTTON_OK, "ok")],
-            [_button(BUTTON_DIRECTIONS, "dirs"), _button(BUTTON_EXPERIENCE, "exp")],
+            [edit, _button(BUTTON_EXPERIENCE, "exp")],
             [_button(BUTTON_REUPLOAD, "reupload")],
         ]
     )
+
+
+def by_profession(data: dict[str, Any]) -> bool:
+    """Подбор по профессии из резюме, а не по направлениям разработки."""
+    resume = resume_profile(data)
+    return bool(resume and resume.profession) and not data.get("directions")
+
+
+def parse_profession(raw: str) -> list[str] | None:
+    """«Бухгалтер по первичке, помощник бухгалтера» → должности; первая — желаемая."""
+    parts = [" ".join(x.split()) for x in re.split(r"[,;\n]", raw)]
+    parts = [x for x in parts if x]
+    if not 1 <= len(parts) <= MAX_ROLES + 1:
+        return None
+    if not all(2 <= len(x) <= 80 and re.search(r"[A-Za-zА-Яа-яЁё]{2}", x) for x in parts):
+        return None
+    return parts
+
+
+def _name_words(name: str) -> set[str]:
+    return {w.casefold().replace("ё", "е") for w in name.split()}
+
+
+def name_conflict(full_name: str, resume_name: str) -> bool:
+    """ФИО из резюме не из слов ФИО анкеты: «Анна Фёдорова» при «Иванов Иван»."""
+    if not full_name or not resume_name:
+        return False
+    return not _name_words(resume_name) <= _name_words(full_name)
+
+
+def matches_markup(items: Sequence[tuple[Project, Any]], start: int) -> InlineKeyboardMarkup:
+    """Отметки к каждой вакансии списка (ADR 0018)."""
+    rows = []
+    for n, (p, _) in enumerate(items, start):
+        key = f"{p.platform}:{p.external_id}"
+        rows.append([_button(f"{n}. {BUTTON_APPLIED}", f"ap:{key}"),
+                     _button(f"{n}. {BUTTON_NOFIT}", f"nf:{key}")])  # fmt: skip
+    return _markup(rows)
+
+
+def reasons_markup(p: Project) -> InlineKeyboardMarkup:
+    key = f"{p.platform}:{p.external_id}"
+    buttons = [_button(learning.REASONS[r], f"nr:{r}:{key}") for r in learning.reasons_for(p)]
+    return _markup([buttons[i : i + 2] for i in range(0, len(buttons), 2)])
+
+
+def _scope_label(scope: str) -> str:
+    return scope or "основной профиль"
 
 
 def toggles_markup(
@@ -331,6 +431,8 @@ def format_profile(data: dict[str, Any], settings: Settings) -> str:
     lines = []
     if data.get("full_name"):
         lines.append(f"👤 {e(data['full_name'])} — «{e(data.get('address', ''))}»")
+        if data.get("resume_name"):
+            lines.append(f"⚠ В резюме другое ФИО: «{e(data['resume_name'])}»")
     directions = data.get("directions") or []
     labels = ", ".join(DIRECTION_LABELS.get(d, d) for d in directions)
     resume = resume_profile(data)
@@ -343,6 +445,8 @@ def format_profile(data: dict[str, Any], settings: Settings) -> str:
         p = ResumeProfile.from_dict(profile)
         if p.profession:
             lines.append(f"💼 Профессия: {e(p.profession)}")
+        if p.roles:
+            lines.append(f"🔁 Смежные должности: {e(', '.join(p.roles))}")
         if p.city:
             lines.append(f"📍 Город: {e(p.city)}")
         lines.append(f"⏳ Стаж: {_years(p.experience_years)}")
@@ -388,23 +492,27 @@ def first_matches(
     поиска `extra`: свежие первыми. Балл — на момент публикации, как в /last, чтобы возраст
     не отсекал открытый заказ; что резюме не выполняет (стаж, город, профессия) —
     отсекается (matching.mismatch). Статусы в базе — владельца (откликнулся, пропустил),
-    поэтому не учитываются. `include_private` — владельцу его же HH."""
+    поэтому не учитываются; свои отметки человека — учитываются (user_marks, ADR 0018).
+    Сеть с одной должностью в разных городах — одной строкой. `include_private` — владельцу
+    его же HH."""
     own = user_settings(data, settings)
-    if tg_id is not None:  # свои отметки «не подходит» (ADR 0013)
-        own = replace(own, lessons=tuple(storage.lessons(tg_id)))
+    closed: set[tuple[str, str]] = set()
+    if tg_id is not None:  # свои отметки (ADR 0013) — для этого резюме
+        own = replace(own, lessons=tuple(storage.lessons(tg_id, lesson_scope(data))))
+        closed = storage.closed_marks(tg_id)
     platforms = set(data.get("platforms") or []) & set(settings.signup_platforms)
     if not include_private:
         platforms -= PRIVATE_PLATFORMS
     candidates: dict[tuple[str, str], Project] = {}
     for p in [*storage.recent_projects(now - FIRST_MATCHES_WINDOW), *extra]:
-        if p.platform in platforms:
+        if p.platform in platforms and (p.platform, p.external_id) not in closed:
             candidates.setdefault((p.platform, p.external_id), p)
     items = []
     for p in candidates.values():
         result = score_project(p, own, p.published_at)
         if result.passed and mismatch(p, data, own) is None:
             items.append((p, result))
-    return rank(items, data)[:limit]
+    return group_chains(rank(items, data, now))[0][:limit]
 
 
 def matches_pages(
@@ -412,9 +520,10 @@ def matches_pages(
     summaries: list[str] | None,
     tz: str,
     reserve: int = 0,
-) -> list[str]:
+) -> list[tuple[str, int, int]]:
     """Список по сообщениям: в каждом сколько влезет (минус `reserve` под приписку),
-    нумерация сквозная, заголовок — в первом."""
+    нумерация сквозная, заголовок — в первом. У страницы — текст и номера её вакансий
+    [lo, hi) для кнопок."""
     title = MATCHES_TITLE.format(count=len(items))
 
     def page(lo: int, hi: int) -> str:
@@ -433,7 +542,7 @@ def matches_pages(
         hi = lo + 1
         while hi < len(items) and len(page(lo, hi + 1)) <= MAX_MESSAGE_LEN - reserve:
             hi += 1
-        pages.append(page(lo, hi))
+        pages.append((page(lo, hi), lo, hi))
         lo = hi
     return pages
 
@@ -508,6 +617,28 @@ class Onboarding:
             return await self._prompt(user, reply)
         await reply(format_profile(user.data, self.settings), None)
 
+    async def learned(self, update: Any, context: Any = None) -> None:
+        """/learned: правила из отметок человека для его резюме и кнопки «забыть»."""
+        user = self.storage.get_user(update.effective_user.id)
+        reply = _replier(update.effective_message)
+        if user is None or user.consent_at is None:
+            return await reply(NOTHING_TEXT, None)
+        await reply(*self._lessons_view(user))
+
+    def _lessons_view(self, user: User) -> tuple[str, InlineKeyboardMarkup]:
+        scope = lesson_scope(user.data)
+        lessons = self.storage.lessons(user.tg_id, scope)
+        text = format_lessons(
+            lessons, how=PUBLIC_LEARNING_HOW, scope=scope,
+            empty="Пока отметок нет — подбор идёт по резюме и анкете.",
+        )  # fmt: skip
+        rows = lessons_keyboard(lessons, prefix=f"{PREFIX}ul:")
+        markup = InlineKeyboardMarkup(
+            [[InlineKeyboardButton(label, callback_data=data) for label, data in row]
+             for row in rows]
+        )  # fmt: skip
+        return text, markup
+
     async def forget(self, update: Any, context: Any = None) -> None:
         reply = _replier(update.effective_message)
         if self.storage.get_user(update.effective_user.id) is None:
@@ -543,6 +674,14 @@ class Onboarding:
             if years is None:
                 return await reply(EXPERIENCE_ERROR, None)
             profile = {**(user.data.get("profile") or {}), "experience_years": years}
+            user = self.storage.save_user(user.tg_id, "review", {**user.data, "profile": profile})
+            return await self._prompt(user, reply)
+        if user.step == "profession_custom":
+            roles = parse_profession(raw)
+            if roles is None:
+                return await reply(PROFESSION_ERROR, None)
+            profile = {**(user.data.get("profile") or {}), "profession": roles[0],
+                       "roles": roles[1:]}  # fmt: skip
             user = self.storage.save_user(user.tg_id, "review", {**user.data, "profile": profile})
             return await self._prompt(user, reply)
         if user.step == "frequency_custom":
@@ -596,19 +735,21 @@ class Onboarding:
         reply = _replier(query.message)
         tg_id = update.effective_user.id
         user = self.storage.get_user(tg_id)
+        if action in FEEDBACK_ACTIONS and user is not None:
+            return await self._feedback(user, action, value, query, reply)  # отвечает сам
         await query.answer()
         if action == "forget_yes":
-            await query.edit_message_reply_markup(reply_markup=None)
+            await _clear(query)
             deleted = self.storage.delete_user(tg_id)
             return await reply(FORGOTTEN_TEXT if deleted else NOTHING_TEXT, None)
         if action == "forget_no":
-            return await query.edit_message_reply_markup(reply_markup=None)
+            return await _clear(query)
         if user is None:
             return await reply(NOTHING_TEXT, None)
         if action == "forget":
             return await self.forget(update, context)
         if action == "restart":
-            await query.edit_message_reply_markup(reply_markup=None)
+            await _clear(query)
             return await self.start(update, context, restart=True)
         handler = {
             ("consent", "agree"): self._agree,
@@ -618,6 +759,7 @@ class Onboarding:
             ("resume", "noresume"): self._no_resume,
             ("review", "ok"): self._review_ok,
             ("review", "dirs"): self._open_directions,
+            ("review", "prof"): self._own_profession,
             ("review", "reupload"): self._reupload,
             ("review", "exp"): self._own_experience,
             ("directions", "dir"): self._toggle_direction,
@@ -633,17 +775,88 @@ class Onboarding:
             ("done", "loc_edit"): self._edit_location,
             ("done", "matches"): self._matches,
         }.get((user.step, action))
-        if handler is None:  # старая кнопка с прошлого шага
+        if handler is None:  # старая кнопка с прошлого шага — понятный ответ и свежие кнопки
+            await reply(STALE_TEXT, None)
+            if user.step == "done":
+                return await self.start(update, context)
             return await self._prompt(user, reply)
         await handler(user, value, query, reply)
 
+    # ── отметки под списком (ADR 0018) ───────────────────────────────────────
+
+    async def _feedback(self, user: User, action: str, value: str, query: Any,
+                        reply: Reply) -> None:  # fmt: skip
+        """«✅ Откликнулся», «👎 Не подходит» и причина, «забыть» в /learned. Вакансия — из
+        списка этого человека (user_marks): чужую или удалённую не найти."""
+        if action == "ul":
+            return await self._unlearn(user, value, query)
+        reason = ""
+        if action == "nr":
+            reason, _, value = value.partition(":")
+            if reason not in learning.REASONS:
+                return await query.answer("Неизвестная кнопка")
+        platform, _, external_id = value.partition(":")
+        p = self.storage.marked_project(user.tg_id, platform, external_id)
+        if p is None:
+            return await query.answer(GONE_TEXT, show_alert=True)
+        owner = user.tg_id == self.settings.owner_id
+        if owner and action != "nr" and self.storage.get_project(platform, external_id):
+            # у владельца это ещё и его собранная вакансия: уйдёт из «Все заказы» и дайджеста
+            status = "applied" if action == "ap" else "skipped"
+            self.storage.set_status(platform, external_id, status, "кнопка под анкетой")
+        if action == "ap":
+            self.storage.set_mark(user.tg_id, platform, external_id, "applied")
+            changes = self._learn(user, "applied", p)
+            await query.answer("Отмечено: откликнулся")
+            await _drop_row(query, value)
+            text = APPLIED_TEXT.format(title=html.escape(p.title))
+            if changes:
+                words = ", ".join(f"«{c.value}»" for c in changes)
+                text += APPLIED_LEARNED.format(words=html.escape(words))
+            return await reply(text, None)
+        if action == "nf":  # пропуск сразу; причина — по желанию, она и учит подбор
+            self.storage.set_mark(user.tg_id, platform, external_id, "skipped")
+            await query.answer()
+            await _drop_row(query, value)
+            return await reply(NOFIT_PROMPT.format(title=html.escape(_short(p.title))),
+                               reasons_markup(p))  # fmt: skip
+        changes = self._learn(user, reason, p)
+        if not changes:
+            return await query.answer(learning.nothing_to_learn(reason), show_alert=True)
+        await query.answer("Запомнил")
+        await _clear(query)
+        await reply(format_learned(reason, changes, 0, self.settings.min_score, "/learned"), None)
+
+    def _learn(self, user: User, reason: str, p: Project) -> list[learning.Change]:
+        """Отметка → правила для текущего резюме человека."""
+        own = user_settings(user.data, self.settings)
+        scope = lesson_scope(user.data)
+        known = self.storage.lessons(user.tg_id, scope)
+        changes = learning.learn(reason, p, own, known)
+        for c in changes:
+            self.storage.save_lesson(user.tg_id, c.kind, c.value, c.weight, p.title, scope)
+        return changes
+
+    async def _unlearn(self, user: User, which: str, query: Any) -> None:
+        scope = lesson_scope(user.data)
+        if which == "all":
+            self.storage.clear_lessons(user.tg_id, scope)
+            await query.answer("Забыл все отметки")
+        elif which.isdigit() and self.storage.delete_lesson(user.tg_id, int(which)):
+            await query.answer("Забыл")
+        else:
+            return await query.answer("Это правило уже снято")
+        text, markup = self._lessons_view(user)
+        with contextlib.suppress(BadRequest):
+            await query.edit_message_text(text, parse_mode=ParseMode.HTML, reply_markup=markup)
+
     async def _agree(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         self.storage.save_user(user.tg_id, "name", {}, consent=True)
         await reply(NAME_TEXT, None)
 
     async def _decline(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         self.storage.delete_user(user.tg_id)
         await reply(DECLINED_TEXT, None)
 
@@ -651,11 +864,11 @@ class Onboarding:
         options = address_options(user.data.get("full_name", ""))
         if not value.isdigit() or int(value) >= len(options):
             return await self._prompt(user, reply)
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         await self._set_address(user, options[int(value)], reply)
 
     async def _own_address(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         self.storage.save_user(user.tg_id, "address_custom", user.data)
         await reply(ADDRESS_CUSTOM_TEXT, None)
 
@@ -664,13 +877,13 @@ class Onboarding:
         await self._prompt(user, reply)
 
     async def _no_resume(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         data = {**user.data, "profile": None, "directions": []}
         user = self.storage.save_user(user.tg_id, "directions", data)
         await self._prompt(user, reply)
 
     async def _review_ok(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         resume = resume_profile(user.data)
         if not user.data.get("directions") and not (resume and resume.profession):
             user = self.storage.save_user(user.tg_id, "directions", user.data)
@@ -679,17 +892,22 @@ class Onboarding:
         await self._prompt(user, reply)
 
     async def _open_directions(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         user = self.storage.save_user(user.tg_id, "directions", user.data)
         await self._prompt(user, reply)
 
+    async def _own_profession(self, user: User, value: str, query: Any, reply: Reply) -> None:
+        await _clear(query)
+        user = self.storage.save_user(user.tg_id, "profession_custom", user.data)
+        await self._prompt(user, reply)
+
     async def _own_experience(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         user = self.storage.save_user(user.tg_id, "experience_custom", user.data)
         await self._prompt(user, reply)
 
     async def _reupload(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         user = self.storage.save_user(user.tg_id, "resume", user.data)
         await self._prompt(user, reply)
 
@@ -698,13 +916,13 @@ class Onboarding:
             return
         chosen = _toggled(user.data.get("directions") or [], value)
         user = self.storage.save_user(user.tg_id, "directions", {**user.data, "directions": chosen})
-        await query.edit_message_reply_markup(reply_markup=self._directions_markup(user))
+        await _edit_markup(query, self._directions_markup(user))
 
     async def _directions_done(self, user: User, value: str, query: Any, reply: Reply) -> None:
         resume = resume_profile(user.data)
         if not user.data.get("directions") and not (resume and resume.profession):
             return await query.answer(DIRECTIONS_EMPTY, show_alert=True)
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         await self._prompt(self._to_platforms(user), reply)
 
     def _to_platforms(self, user: User) -> User:
@@ -720,7 +938,7 @@ class Onboarding:
             return
         chosen = _toggled(user.data.get("platforms") or [], value)
         user = self.storage.save_user(user.tg_id, "platforms", {**user.data, "platforms": chosen})
-        await query.edit_message_reply_markup(reply_markup=self._platforms_markup(user))
+        await _edit_markup(query, self._platforms_markup(user))
 
     async def _all_platforms(self, user: User, value: str, query: Any, reply: Reply) -> None:
         data = {**user.data, "platforms": list(signup_platforms(user.data, self.settings))}
@@ -731,7 +949,7 @@ class Onboarding:
         live = self.settings.signup_platforms
         if not any(p in live for p in user.data.get("platforms") or []):
             return await query.answer(PLATFORMS_EMPTY, show_alert=True)
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         if asks_location(user.data, self.settings):
             data = {**user.data, "location": list(location_choice(user.data))}
             user = self.storage.save_user(user.tg_id, "location", data)
@@ -744,10 +962,10 @@ class Onboarding:
             return
         chosen = _toggled(list(location_choice(user.data)), value)
         user = self.storage.save_user(user.tg_id, "location", {**user.data, "location": chosen})
-        await query.edit_message_reply_markup(reply_markup=self._location_markup(user))
+        await _edit_markup(query, self._location_markup(user))
 
     async def _location_done(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         data = dict(user.data)
         if data.pop("editing", False):
             self.storage.save_user(user.tg_id, "done", data)
@@ -759,7 +977,7 @@ class Onboarding:
 
     async def _edit_location(self, user: User, value: str, query: Any, reply: Reply) -> None:
         """Как смена частоты: анкета остаётся пройденной."""
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         data = {**user.data, "location": list(location_choice(user.data)), "editing": True}
         user = self.storage.save_user(user.tg_id, "location", data)
         await self._prompt(user, reply)
@@ -767,17 +985,17 @@ class Onboarding:
     async def _pick_frequency(self, user: User, value: str, query: Any, reply: Reply) -> None:
         if value not in PRESETS:
             return await self._prompt(user, reply)
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         await self._set_schedule(user, PRESETS[value][1], reply)
 
     async def _own_frequency(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         user = self.storage.save_user(user.tg_id, "frequency_custom", user.data)
         await self._prompt(user, reply)
 
     async def _edit_frequency(self, user: User, value: str, query: Any, reply: Reply) -> None:
         """Сменить частоту после анкеты: анкета остаётся пройденной (рассылка не прерывается)."""
-        await query.edit_message_reply_markup(reply_markup=None)
+        await _clear(query)
         user = self.storage.save_user(user.tg_id, "frequency", {**user.data, "editing": True})
         await self._prompt(user, reply)
 
@@ -809,13 +1027,18 @@ class Onboarding:
     ) -> None:
         """Заказы под анкету. Сбой здесь не должен портить сохранённую анкету."""
         tz = self.settings.timezone
-        later = MATCHES_LATER.format(
-            when=describe(Schedule.from_dict(user.data["schedule"])), tz=tz_label(tz)
+        owner = user.tg_id == self.settings.owner_id
+        when = describe(Schedule.from_dict(user.data["schedule"]))
+        later = (
+            MATCHES_LATER_OWNER.format(when=when, tz=tz_label(tz))
+            if owner and self.settings.digest_enabled  # дайджест владельца — по его анкете
+            else MATCHES_LATER.format(when=when, tz=tz_label(tz), button=BUTTON_MATCHES)
         )
         live: list[Project] = []
+        statuses: dict[str, str] = {}
         if self.search is not None:
             try:
-                live = await self.search(user.data)
+                live = await self.search(user.data, statuses=statuses)
             except Exception as exc:  # SuperJob недоступен — остаются собранные
                 log.warning("вакансии под анкету не найдены: %s", type(exc).__name__)
         try:
@@ -825,27 +1048,34 @@ class Onboarding:
                 extra=live,
             )  # fmt: skip
             if not items:
-                return await reply(f"{self._none_text(user)}\n\n{later}", None)
+                return await reply(f"{self._none_text(user, statuses)}\n\n{later}", None)
             projects = [p for p, _ in items]
             summaries = await self.summarize(projects) if self.summarize else None
             pages = matches_pages(items, summaries, tz, reserve=len(later) + 2)
+            self.storage.mark_shown(user.tg_id, projects)  # для кнопок отметок
         except Exception as exc:
             log.error("заказы под анкету не собраны: %s", type(exc).__name__)
             return
         log.info("заказы под анкету: %d", len(items))
-        pages[-1] = f"{pages[-1]}\n\n{later}"
-        for text in pages:
-            await reply(text, None)
+        for i, (text, lo, hi) in enumerate(pages):
+            if i == len(pages) - 1:
+                text = f"{text}\n\n{later}"
+            await reply(text, matches_markup(items[lo:hi], lo + 1))
 
-    def _none_text(self, user: User) -> str:
-        """Пусто: не разработчику — что вакансий нет в его городе (SuperJob в небольших
-        городах почти пуст), а не совет добавить направления."""
+    def _none_text(self, user: User, statuses: dict[str, str] | None = None) -> str:
+        """Пусто: не разработчику — где искал на самом деле (свой город или все, удалённые) и
+        что ответила каждая площадка, а не совет добавить направления."""
         resume = resume_profile(user.data)
-        if resume and resume.profession and resume.city and not user.data.get("directions"):
-            return MATCHES_NONE_CITY.format(
-                city=html.escape(resume.city), profession=html.escape(resume.profession)
-            )
-        return MATCHES_NONE
+        if not by_profession(user.data) or resume is None:
+            return MATCHES_NONE
+        text = MATCHES_NONE_VACANCIES.format(
+            profession=html.escape(resume.profession),
+            where=html.escape(describe_location(user.data)),
+        )
+        if statuses:
+            shown = "; ".join(f"{PLATFORM_NAMES.get(p, p)} — {s}" for p, s in statuses.items())
+            text += f"\nПлощадки: {html.escape(shown)}."
+        return f"{text}\nЗагляну снова, когда появятся."
 
     # ── резюме ───────────────────────────────────────────────────────────────
 
@@ -881,6 +1111,10 @@ class Onboarding:
             self.storage.save_user(user.tg_id, "resume", user.data)
             return await reply(RESUME_FAILED, resume_markup())
         data = {**user.data, "profile": profile.to_dict(), "directions": profile.directions}
+        data.pop("resume_name", None)
+        resume_name = person_name(text)
+        if name_conflict(data.get("full_name", ""), resume_name):
+            data["resume_name"] = resume_name  # предупреждение в анкете; /forget удаляет
         user = self.storage.save_user(user.tg_id, "review", data)
         log.info(
             "резюме разобрано (%s): направлений %d, слов %d, фактов %d",
@@ -908,11 +1142,27 @@ class Onboarding:
         elif step == "experience_custom":
             await reply(EXPERIENCE_TEXT, None)
         elif step == "review":
+            notes = ""
+            if data.get("resume_name"):
+                notes += "\n\n" + NAME_CONFLICT.format(
+                    resume=html.escape(data["resume_name"]),
+                    anketa=html.escape(data.get("full_name", "")),
+                    reupload=BUTTON_REUPLOAD, restart=BUTTON_RESTART,
+                )  # fmt: skip
+            scope = lesson_scope(data)
+            others = {k: n for k, n in self.storage.lesson_scopes(user.tg_id).items()
+                      if k != scope and n}  # fmt: skip
+            if others:
+                names = ", ".join(f"«{_scope_label(k)}»: {n}" for k, n in others.items())
+                notes += "\n\n" + OTHER_SCOPES.format(scopes=html.escape(names))
+            shown = {**data, "full_name": None, "resume_name": None}
             await reply(
                 "Вот что я понял из резюме:\n\n"
-                f"{format_profile({**data, 'full_name': None}, self.settings)}\n\nВсё верно?",
-                review_markup(),
+                f"{format_profile(shown, self.settings)}{notes}\n\nВсё верно?",
+                review_markup(by_profession(data)),
             )
+        elif step == "profession_custom":
+            await reply(PROFESSION_TEXT, None)
         elif step == "directions":
             await reply(DIRECTIONS_TEXT, self._directions_markup(user))
         elif step == "platforms":
@@ -960,6 +1210,41 @@ async def _pasted(raw: str) -> str:
     if len(text) < MIN_PASTED_RESUME_CHARS:
         raise ResumeError("Слишком короткий текст для резюме.")
     return text
+
+
+FEEDBACK_ACTIONS = frozenset({"ap", "nf", "nr", "ul"})
+
+
+async def _clear(query: Any) -> None:
+    """Убрать кнопки под сообщением. Уже убраны или сообщение старое — Telegram отвечает
+    BadRequest; нажатие от этого не должно падать."""
+    with contextlib.suppress(BadRequest):
+        await query.edit_message_reply_markup(reply_markup=None)
+
+
+async def _edit_markup(query: Any, markup: InlineKeyboardMarkup) -> None:
+    with contextlib.suppress(BadRequest):
+        await query.edit_message_reply_markup(reply_markup=markup)
+
+
+async def _drop_row(query: Any, key: str) -> None:
+    """Под списком убрать кнопки отмеченной вакансии, остальные оставить."""
+    markup = getattr(getattr(query, "message", None), "reply_markup", None)
+    rows = getattr(markup, "inline_keyboard", None)
+    if not rows:
+        return
+    mine = {f"{PREFIX}ap:{key}", f"{PREFIX}nf:{key}"}
+    left = [row for row in rows if not any(b.callback_data in mine for b in row)]
+    if len(left) == len(rows):
+        return
+    if left:
+        await _edit_markup(query, InlineKeyboardMarkup(left))
+    else:
+        await _clear(query)
+
+
+def _short(title: str, size: int = 60) -> str:
+    return title if len(title) <= size else title[: size - 1] + "…"
 
 
 def _toggled(chosen: list[str], value: str) -> list[str]:

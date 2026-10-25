@@ -7,10 +7,11 @@ import html
 import logging
 import re
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime, timedelta
 from typing import Protocol
 
+from freelance_bot import learning
 from freelance_bot.config import Settings
 from freelance_bot.drafting import DraftGenerator, fill_estimate, fill_offer
 from freelance_bot.http import BlockedError, SourceError
@@ -121,6 +122,15 @@ class Pipeline:
         self._lock = asyncio.Lock()
         self.summarizer = summarizer or CachedSummarizer(BuiltinSummarizer(), storage)
 
+    @property
+    def owner_key(self) -> int:
+        """Чьи отметки учитывает лента владельца: его user_id (разовый once без него — 0)."""
+        return self.settings.owner_id or 0
+
+    def scoring_settings(self) -> Settings:
+        """Настройки с правилами из отметок владельца (ADR 0013), прочитанными сейчас."""
+        return replace(self.settings, lessons=tuple(self.storage.lessons(self.owner_key)))
+
     # ── цикл ─────────────────────────────────────────────────────────────────
 
     async def run_once(self, platform: Platform | None = None) -> CycleReport:
@@ -171,6 +181,7 @@ class Pipeline:
         bootstrap = self.storage.get_flag(f"bootstrapped:{platform}") is None
         cutoff = now - timedelta(hours=self.settings.max_age_for(platform))
         candidates: list[tuple[Project, ScoreResult]] = []
+        scoring = self.scoring_settings()
         for p in projects:
             if not self.storage.upsert_project(p):
                 continue
@@ -178,7 +189,7 @@ class Pipeline:
             if bootstrap and p.published_at < cutoff:
                 self.storage.set_status(p.platform, p.external_id, "filtered_out", "bootstrap")
                 continue
-            result = score_project(p, self.settings, now)
+            result = score_project(p, scoring, now)
             self.storage.save_score(p.platform, p.external_id, result)
             if not result.passed:
                 note = result.excluded_reason or f"score {result.score} < {self.settings.min_score}"
@@ -321,6 +332,35 @@ class Pipeline:
         items.sort(key=lambda item: (item[0].published_at, item[1].score), reverse=True)
         return items
 
+    # ── самообучение (ADR 0013) ──────────────────────────────────────────────
+
+    def learn(
+        self, reason: str, platform: Platform | str, external_id: str
+    ) -> tuple[list[learning.Change], int] | None:
+        """Отметка владельца → правила в lessons; очередь дайджеста пересчитывается сразу.
+        Возвращает правила и сколько ждавших дайджеста заказов теперь не придёт."""
+        p = self.storage.get_project(platform, external_id)
+        if p is None:
+            return None
+        known = self.storage.lessons(self.owner_key)
+        changes = learning.learn(reason, p, self.settings, known)
+        for c in changes:
+            self.storage.save_lesson(self.owner_key, c.kind, c.value, c.weight, p.title)
+        return changes, (self.apply_lessons() if changes else 0)
+
+    def apply_lessons(self) -> int:
+        """Заказы в очереди дайджеста — заново по правилам отметок; не прошедшие снимаются."""
+        scoring = self.scoring_settings()
+        removed = 0
+        for p in self.storage.projects_with_status("queued", self._clock() - OFFER_WINDOW):
+            result = score_project(p, scoring, p.published_at)
+            self.storage.save_score(p.platform, p.external_id, result)
+            if not result.passed:
+                note = result.excluded_reason or f"score {result.score} < {self.settings.min_score}"
+                self.storage.set_status(p.platform, p.external_id, "filtered_out", note)
+                removed += 1
+        return removed
+
     def mark_notified(self, projects: list[Project]) -> None:
         """Дайджест доставлен: больше эти заказы как новые не присылаются."""
         for p in projects:
@@ -334,8 +374,9 @@ class Pipeline:
         балл считается на момент публикации, чтобы возраст не отсекал заказ."""
         since = self._clock() - OFFER_WINDOW
         items = []
+        scoring = self.scoring_settings()
         for p in self.storage.recent_projects(since, OFFER_CLOSED):
-            result = score_project(p, self.settings, p.published_at)
+            result = score_project(p, scoring, p.published_at)
             if result.passed and not self._paid_response_skipped(p):
                 items.append((p, result))
         items.sort(key=lambda item: (item[0].published_at, item[1].score), reverse=True)

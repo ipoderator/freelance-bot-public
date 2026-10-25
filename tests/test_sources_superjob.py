@@ -237,5 +237,6 @@ async def test_pipeline_sends_vacancy_cards_without_drafts():
     assert [b[1] for row in keyboard for b in row] == [
         "applied:superjob:51000001",
         "skip:superjob:51000001",
+        "nofit:superjob:51000001",
     ]
     storage.close()

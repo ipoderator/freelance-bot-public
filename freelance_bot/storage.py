@@ -14,7 +14,7 @@ from datetime import UTC, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from freelance_bot.models import Mode, Project, ScoreResult, User
+from freelance_bot.models import Lesson, Mode, Project, ScoreResult, User
 
 STATUSES: tuple[str, ...] = (
     "new",
@@ -100,6 +100,23 @@ MIGRATIONS: tuple[str, ...] = (
         created_at      TEXT NOT NULL,
         updated_at      TEXT NOT NULL,
         completed_at    TEXT
+    );
+    """,
+    # Самообучение (ADR 0013): правила из отметок «👎 Не подходит» и «✅ Откликнулся».
+    # tg_id — чьи отметки (владелец или пользователь анкеты); /forget удаляет и их.
+    """
+    CREATE TABLE lessons (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id           INTEGER NOT NULL,
+        kind            TEXT NOT NULL
+            CHECK (kind IN ('topic', 'level', 'office', 'pay', 'company')),
+        value           TEXT NOT NULL,
+        weight          INTEGER NOT NULL,
+        hits            INTEGER NOT NULL DEFAULT 1 CHECK (hits > 0),
+        example         TEXT NOT NULL DEFAULT '',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        UNIQUE (tg_id, kind, value)
     );
     """,
 )
@@ -425,6 +442,7 @@ class Storage:
 
     def delete_user(self, tg_id: int) -> bool:
         with self._conn:
+            self._conn.execute("DELETE FROM lessons WHERE tg_id = ?", (tg_id,))
             return self._conn.execute("DELETE FROM users WHERE tg_id = ?", (tg_id,)).rowcount > 0
 
     @staticmethod
@@ -439,6 +457,48 @@ class Storage:
             consent_at=when(row["consent_at"]),
             completed_at=when(row["completed_at"]),
         )
+
+    # ── самообучение (ADR 0013) ──────────────────────────────────────────────
+
+    def lessons(self, tg_id: int) -> list[Lesson]:
+        rows = self._conn.execute(
+            "SELECT * FROM lessons WHERE tg_id = ? ORDER BY kind, updated_at DESC", (tg_id,)
+        ).fetchall()
+        return [
+            Lesson(
+                id=int(r["id"]), kind=r["kind"], value=r["value"], weight=int(r["weight"]),
+                hits=int(r["hits"]), example=r["example"],
+            )  # fmt: skip
+            for r in rows
+        ]
+
+    def save_lesson(self, tg_id: int, kind: str, value: str, weight: int, example: str) -> None:
+        """Новое правило или то же ещё раз: вес заменяется, счётчик отметок растёт."""
+        now = self._now()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO lessons (tg_id, kind, value, weight, example, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (tg_id, kind, value) DO UPDATE SET weight = excluded.weight,
+                    hits = lessons.hits + 1, example = excluded.example,
+                    updated_at = excluded.updated_at
+                """,
+                (tg_id, kind, value, weight, example, now, now),
+            )
+
+    def delete_lesson(self, tg_id: int, lesson_id: int) -> bool:
+        with self._conn:
+            return (
+                self._conn.execute(
+                    "DELETE FROM lessons WHERE tg_id = ? AND id = ?", (tg_id, lesson_id)
+                ).rowcount
+                > 0
+            )
+
+    def clear_lessons(self, tg_id: int) -> int:
+        with self._conn:
+            return self._conn.execute("DELETE FROM lessons WHERE tg_id = ?", (tg_id,)).rowcount
 
     # ── статистика ───────────────────────────────────────────────────────────
 

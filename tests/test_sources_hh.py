@@ -344,6 +344,7 @@ async def test_pipeline_sends_vacancy_cards_once_without_drafts() -> None:
     assert [b[1] for row in keyboard for b in row] == [
         f"applied:hh:{vacancy_key('Специалист по контент-ферме', 'Натури Фарм', 'Москва')}",
         f"skip:hh:{vacancy_key('Специалист по контент-ферме', 'Натури Фарм', 'Москва')}",
+        f"nofit:hh:{vacancy_key('Специалист по контент-ферме', 'Натури Фарм', 'Москва')}",
     ]
     grand = next(c[0] for c in notifier.cards if "Grand Line" in c[0])
     assert "💵 зарплата: не указана" in grand

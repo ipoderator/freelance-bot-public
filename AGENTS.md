@@ -40,6 +40,7 @@ Telegram-бот для фрилансера: находит свежие зак�
 - `freelance_bot/drafting.py` (1100+ строк) + `profile/profile.toml` — черновики и валидатор; факты об опыте только из профиля.
 - `freelance_bot/summary.py` — суть заказа (📝) для карточки и `/last`.
 - `freelance_bot/policy.py` — `decide_mode`, `SENDERS`; `freelance_bot/storage.py` — SQLite и флаги.
+- `freelance_bot/learning.py` — самообучение (ADR 0013): «👎 Не подходит» + причина → правило в таблице `lessons`, поправка к баллу; `/learned` и кнопка «🧠 Обучение» — список правил и «забыть».
 - `freelance_bot/onboarding.py` — анкета публичного бота (ADR 0011): согласие → ФИО → обращение → резюме → направления → площадки, таблица `users`, частота уведомлений — `freelance_bot/schedule.py` (раз в час 9–21 по умолчанию или свой тайминг); `freelance_bot/resume.py` — текст из PDF/DOCX/TXT и ссылок Google/Яндекс Диска, разбор нейросетью с проверкой по тексту резюме или встроенный. Рассылка по анкетам — этап 2, ещё не сделан.
 - `tests/fixtures/` — снятые ответы площадок; `data/` — SQLite (не в git).
 
@@ -99,6 +100,7 @@ Claude применяет их сам по описанию; вызвать яв
 - Реальные команды `once`/`run` ходят в сеть; не запускать их в проверках.
 - Бот работает на сервере; не запускать `run` на Mac параллельно — Telegram отдаёт обновления одному процессу (Conflict).
 - SuperJob API отдаёт не больше 40 вакансий за запрос: на `count=100` — 40 и `more: false`, остальное теряется. Листать по `PAGE_SIZE = 40` до `more: false` (`sources/superjob.py`).
+- Отбор с отметками пользователя — только через `Pipeline.scoring_settings()` (или `replace(settings, lessons=…)`): голый `self.settings` правил из `lessons` не видит (ADR 0013).
 - Свой срок свежести площадки — `[sources.<p>] max_age_hours` (у SuperJob 72 ч); читать через `Settings.max_age_for(platform)`, а не `settings.max_age_hours`. Флаг `--max-age-hours` у `once` перекрывает и его.
 - HH: сайт и API hh.ru не трогать — парсинг запрещён условиями (п. 6.1.38), API без токена 403 (ADR 0009). Вакансии только из чата с @hh_rabota_bot; Хэдди ничего не отправлять (номера, кнопки) — только чтение.
 - Сессию `HH_TG_SESSION` не запускать одновременно на Mac и сервере: Telegram отзовёт её (AUTH_KEY_DUPLICATED). Ключ вакансии HH — хэш названия, компании и города (`vacancy_key`): ссылки `my.hh.ru/b/…` персональные и без ID.

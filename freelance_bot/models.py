@@ -11,6 +11,8 @@ Mode = Literal["notify", "draft", "auto"]
 
 PLATFORMS: tuple[str, ...] = get_args(Platform)
 MODES: tuple[str, ...] = get_args(Mode)
+# Вакансии (HH, SuperJob): карточка без черновика, отклик пользователь делает на сайте
+VACANCY_PLATFORMS = frozenset({"hh", "superjob"})
 
 
 @dataclass(frozen=True)
@@ -68,3 +70,19 @@ class User:
     data: dict[str, Any]  # ФИО, обращение, профиль из резюме, направления, площадки
     consent_at: datetime | None = None
     completed_at: datetime | None = None
+
+
+LessonKind = Literal["topic", "level", "office", "pay", "company"]
+LESSON_KINDS: tuple[str, ...] = get_args(LessonKind)
+
+
+@dataclass(frozen=True)
+class Lesson:
+    """Чему бот научился по отметкам пользователя (learning.py, ADR 0013)."""
+
+    id: int
+    kind: LessonKind  # topic/level — слово в названии; office — без удалёнки; pay; company
+    value: str  # слово, название компании, «vacancy»/«order» для pay; у office — ""
+    weight: int  # баллы к оценке (topic, level, office); у pay — порог в рублях включительно
+    hits: int  # сколько раз отмечено
+    example: str  # название последнего заказа или вакансии, по которому научился

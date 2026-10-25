@@ -10,8 +10,18 @@ from collections.abc import Mapping, Sequence
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+from freelance_bot import learning
 from freelance_bot.config import Settings
-from freelance_bot.models import PLATFORMS, Draft, ModeDecision, Platform, Project, ScoreResult
+from freelance_bot.models import (
+    PLATFORMS,
+    VACANCY_PLATFORMS,
+    Draft,
+    Lesson,
+    ModeDecision,
+    Platform,
+    Project,
+    ScoreResult,
+)
 from freelance_bot.pricing import Estimate
 from freelance_bot.scoring import DIRECTION_LABELS
 
@@ -33,6 +43,8 @@ BUTTON_SKIP = "⏭ Пропустить"
 BUTTON_REDRAFT = "🔄 Другой вариант"
 BUTTON_OFFER = "💬 Цена и срок"
 BUTTON_CANCEL = "✖ Отмена"
+BUTTON_NOFIT = "👎 Не подходит"
+BUTTON_FORGET_ALL = "🗑 Забыть всё"
 OFFER_EXAMPLE = "15000, 5"
 SUMMARY_MARK = "📝"
 LIST_TITLE = "📋 <b>Подходящие заказы</b> — свежие сверху"
@@ -44,7 +56,21 @@ MENU_NEW = "🆕 Новые"
 MENU_ALL = "📋 Все заказы"
 MENU_STATS = "📊 Статистика"
 MENU_STATUS = "⚙️ Статус"
-MENU_ROWS: tuple[tuple[str, ...], ...] = ((MENU_NEW, MENU_ALL), (MENU_STATS, MENU_STATUS))
+MENU_LEARNED = "🧠 Обучение"
+MENU_ROWS: tuple[tuple[str, ...], ...] = (
+    (MENU_NEW, MENU_ALL),
+    (MENU_STATS, MENU_STATUS),
+    (MENU_LEARNED,),
+)
+# Самообучение (ADR 0013): как отметки меняют отбор — в меню, /learned и ответе на отметку
+LEARNING_HOW = (
+    f"Под каждой карточкой — «{BUTTON_NOFIT}»: выберите причину, и я поменяю отбор — "
+    "похожие станут приходить реже или совсем перестанут. "
+    f"«{BUTTON_APPLIED}» — похожие поднимутся выше."
+)
+NOFIT_PROMPT = (
+    "Чем не подходит «{title}»? Выберите причину — я запомню и поменяю отбор."
+)
 # Что площадка требует от отклика — подсказки под готовым текстом (docs/platforms.md, БЗ 62056)
 PLATFORM_TIPS: dict[str, tuple[str, ...]] = {
     "fl": (
@@ -66,7 +92,6 @@ PLATFORM_TIPS: dict[str, tuple[str, ...]] = {
     ),
 }
 # Вакансии HH: отклик пользователь делает на hh.ru сам — без черновика, цены и срока
-VACANCY_PLATFORMS = frozenset({"hh", "superjob"})
 MAX_MESSAGE_LEN = 4000  # Telegram режет на 4096; запас на HTML-разметку
 VACANCY_NOTE = "Отклик на вакансию — на hh.ru, по ссылке: бот вакансиям отклики не готовит."
 ESTIMATE_MARK = "🧮"
@@ -227,12 +252,14 @@ def format_draft(d: Draft, estimated: bool = False) -> str:
 
 
 def card_keyboard(platform: Platform | str, external_id: str) -> list[list[tuple[str, str]]]:
+    nofit = [(BUTTON_NOFIT, f"nofit:{platform}:{external_id}")]
     if platform in VACANCY_PLATFORMS:  # без «Цена и срок» и «Другой вариант»: отклик на hh.ru
         return [
             [
                 (BUTTON_APPLIED, f"applied:{platform}:{external_id}"),
                 (BUTTON_SKIP, f"skip:{platform}:{external_id}"),
-            ]
+            ],
+            nofit,
         ]
     return [
         [
@@ -243,7 +270,57 @@ def card_keyboard(platform: Platform | str, external_id: str) -> list[list[tuple
             (BUTTON_OFFER, f"offer:{platform}:{external_id}"),
             (BUTTON_REDRAFT, f"redraft:{platform}:{external_id}"),
         ],
+        nofit,
     ]
+
+
+def nofit_keyboard(p: Project) -> list[list[tuple[str, str]]]:
+    """Причины «не подходит» по две в ряд; у заказов бирж — без офиса и компании."""
+    buttons = [
+        (learning.REASONS[r], f"nf-{r}:{p.platform}:{p.external_id}")
+        for r in learning.reasons_for(p)
+    ]
+    return [buttons[i : i + 2] for i in range(0, len(buttons), 2)]
+
+
+def format_learned(
+    reason: str, changes: Sequence[learning.Change], removed: int, min_score: int
+) -> str:
+    """Ответ на причину: что именно запомнил и как это меняет отбор."""
+    lines = [f"🧠 <b>Запомнил</b> — {esc(learning.REASONS.get(reason, reason))}:"]
+    lines.extend(f"• {esc(learning.describe(c))}" for c in changes)
+    if any(c.kind in ("topic", "level", "office") for c in changes):
+        lines.append(
+            f"Проходной балл — {min_score}: похожие будут приходить реже, "
+            "а повторная отметка усилит штраф."
+        )
+    if removed:
+        lines.append(f"Из ближайшего списка новых убрал похожих: {removed}.")
+    lines.append(f"Всё, чему я научился, и как отменить — {MENU_LEARNED} или /learned.")
+    return "\n".join(lines)
+
+
+def format_lessons(lessons: Sequence[Lesson]) -> str:
+    """/learned: правила из отметок с номерами — номер на кнопке снимает правило."""
+    lines = ["🧠 <b>Чему я научился по вашим отметкам</b>", "", esc(LEARNING_HOW), ""]
+    if not lessons:
+        lines.append("Пока отметок нет — отбор идёт только по профилю и фильтрам (/filters).")
+        return "\n".join(lines)
+    for number, x in enumerate(lessons, 1):
+        times = f" (отметок: {x.hits})" if x.hits > 1 else ""
+        lines.append(f"{number}. {esc(learning.describe(x))}{times}")
+        if x.example:
+            lines.append(f"    по «{esc(_short(x.example))}»")
+    lines += ["", "Чтобы забыть правило, нажмите его номер."]
+    return "\n".join(lines)
+
+
+def lessons_keyboard(lessons: Sequence[Lesson]) -> list[list[tuple[str, str]]]:
+    buttons = [(f"✖ {n}", f"unlearn:{x.id}") for n, x in enumerate(lessons, 1)]
+    rows = [buttons[i : i + 4] for i in range(0, len(buttons), 4)]
+    if lessons:
+        rows.append([(BUTTON_FORGET_ALL, "unlearn:all")])
+    return rows
 
 
 def format_offer_list(
@@ -311,6 +388,7 @@ def format_start(next_digest: str | None) -> str:
     ]
     if next_digest:
         lines += ["", f"⏰ Новые присылаю сам раз в час, следующий список — {esc(next_digest)}."]
+    lines += ["", f"🧠 {LEARNING_HOW} Чему я научился — {MENU_LEARNED}."]
     lines += ["", "Ещё: /filters — фильтры, /pause и /resume — пауза."]
     return "\n".join(lines)
 
@@ -348,13 +426,17 @@ def format_offer_hint() -> str:
     )
 
 
-def format_applied(p: Project) -> str:
+def format_applied(p: Project, learned: Sequence[learning.Change] = ()) -> str:
     site = PLATFORM_NAMES.get(p.platform, p.platform)
     what = "Вакансия убрана" if is_vacancy(p) else "Заказ убран"
-    return (
+    text = (
         f"✅ Записал: вы откликнулись на «{esc(p.title)}» ({esc(site)}). "
         f"{what} из /last, отклик учтён в /stats."
     )
+    if learned:
+        words = ", ".join(f"«{c.value}»" for c in learned)
+        text += f"\n🧠 Похожие ({esc(words)}) теперь будут выше — {MENU_LEARNED}."
+    return text
 
 
 def format_offer(
@@ -431,6 +513,8 @@ def format_filters(settings: Settings) -> str:
     for name, words in settings.exclusions.items():
         short = ", ".join(words[:6]) + ("…" if len(words) > 6 else "")
         lines.append(f"• {esc(name)}: {esc(short)}")
+    lines.append("")
+    lines.append(f"🧠 Правил из ваших отметок: {len(settings.lessons)} — {MENU_LEARNED}, /learned")
     lines.append("")
     lines.append("🌐 <b>Площадки</b>")
     for platform in PLATFORMS:

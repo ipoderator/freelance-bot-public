@@ -38,6 +38,7 @@ from telegram.ext import (
 
 from freelance_bot.config import Settings
 from freelance_bot.drafting import remaining_placeholders
+from freelance_bot.learning import REASONS, nothing_to_learn
 from freelance_bot.models import Project, ScoreResult
 from freelance_bot.onboarding import PREFIX as ONBOARDING_PREFIX
 from freelance_bot.onboarding import PUBLIC_HELP, Onboarding
@@ -47,21 +48,26 @@ from freelance_bot.storage import Storage
 from freelance_bot.telegram_ui import (
     BUTTON_APPLIED,
     BUTTON_CANCEL,
+    BUTTON_NOFIT,
     BUTTON_OFFER,
     BUTTON_REDRAFT,
     BUTTON_SKIP,
     DIGEST_TITLE,
     MAX_MESSAGE_LEN,
     MENU_ALL,
+    MENU_LEARNED,
     MENU_NEW,
     MENU_ROWS,
     MENU_STATS,
     MENU_STATUS,
+    NOFIT_PROMPT,
     PLATFORM_NAMES,
     VACANCY_NOTE,
     VACANCY_PLATFORMS,
     format_applied,
     format_filters,
+    format_learned,
+    format_lessons,
     format_offer,
     format_offer_hint,
     format_offer_list,
@@ -70,6 +76,8 @@ from freelance_bot.telegram_ui import (
     format_stats,
     format_status,
     format_vacancy_card,
+    lessons_keyboard,
+    nofit_keyboard,
     offer_list_keyboard,
     selection_reason,
 )
@@ -86,6 +94,7 @@ COMMANDS: list[tuple[str, str]] = [
     ("stats", "Статистика за сегодня и 7 дней"),
     ("last", "Подходящие заказы: выбрать и получить готовый отклик"),
     ("new", "Новые заказы, которых ещё не присылал"),
+    ("learned", "Чему бот научился по отметкам «Не подходит»"),
     ("signup", "Заполнить анкету заново"),
 ]
 # Меню посторонних в публичном режиме (ADR 0011)
@@ -107,7 +116,9 @@ LAST_LIST_FLAG = "last_list"  # "<platform>:<id>,…" — заказы посл�
 MAX_OFFER_DAYS = 365
 MAX_OFFER_TEXT = 40  # «15 000 руб., 14 дней» — 21 символ
 MENU_VERSION_FLAG = "menu_version"
-MENU_VERSION = "1"  # новое меню — новая версия: бот один раз пришлёт его сам после запуска
+CARD_ACTIONS = ("applied", "skip", "redraft", "offer", "cancel", "pick", "nofit")
+NOFIT_TITLE_MAX = 60
+MENU_VERSION = "2"  # новое меню — новая версия: бот один раз пришлёт его сам после запуска
 MENU_MARKUP = ReplyKeyboardMarkup(
     [list(row) for row in MENU_ROWS], resize_keyboard=True, is_persistent=True
 )
@@ -138,6 +149,10 @@ def parse_offer(text: str) -> tuple[int, int] | None:
     if price <= 0 or not 0 < days <= MAX_OFFER_DAYS:
         return None
     return price, days
+
+
+def _short_title(title: str) -> str:
+    return title if len(title) <= NOFIT_TITLE_MAX else title[: NOFIT_TITLE_MAX - 1] + "…"
 
 
 def _markup(keyboard: Keyboard) -> InlineKeyboardMarkup:
@@ -377,7 +392,14 @@ class BotHandlers:
     async def filters_(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return await self._deny(update)
-        await self._reply(update, format_filters(self.settings))
+        await self._reply(update, format_filters(self.pipeline.scoring_settings()))
+
+    async def learned(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Правила из отметок владельца (ADR 0013): что запомнил и кнопки «забыть»."""
+        if not self._is_owner(update):
+            return await self._deny(update)
+        lessons = self.storage.lessons(self.pipeline.owner_key)
+        await self._reply(update, format_lessons(lessons), _markup(lessons_keyboard(lessons)))
 
     async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
@@ -452,6 +474,7 @@ class BotHandlers:
             MENU_ALL: self.last,
             MENU_STATS: self.stats,
             MENU_STATUS: self.status,
+            MENU_LEARNED: self.learned,
         }.get(message_text.strip())
         if menu is not None:
             return await menu(update, context)
@@ -515,6 +538,7 @@ class BotHandlers:
                     InlineKeyboardButton(BUTTON_APPLIED, callback_data=f"applied:{key}"),
                     InlineKeyboardButton(BUTTON_SKIP, callback_data=f"skip:{key}"),
                 ],
+                [InlineKeyboardButton(BUTTON_NOFIT, callback_data=f"nofit:{key}")],
             ]
         )
         text = format_vacancy_card(
@@ -538,7 +562,10 @@ class BotHandlers:
                     InlineKeyboardButton(BUTTON_OFFER, callback_data=f"offer:{key}"),
                     InlineKeyboardButton(BUTTON_REDRAFT, callback_data=f"redraft:{key}"),
                 ],
-                [InlineKeyboardButton(BUTTON_APPLIED, callback_data=f"applied:{key}")],
+                [
+                    InlineKeyboardButton(BUTTON_APPLIED, callback_data=f"applied:{key}"),
+                    InlineKeyboardButton(BUTTON_NOFIT, callback_data=f"nofit:{key}"),
+                ],
             ]
         )
         leftovers = remaining_placeholders(ready.draft.text)
@@ -598,9 +625,12 @@ class BotHandlers:
             return await self._deny(update)
         query = update.callback_query
         action, _, rest = (query.data or "").partition(":")
+        if action == "unlearn":
+            return await self._unlearn(query, rest)
         platform, _, external_id = rest.partition(":")
+        reason = action.startswith("nf-") and action.removeprefix("nf-") in REASONS
         if (
-            action not in ("applied", "skip", "redraft", "offer", "cancel", "pick")
+            (action not in CARD_ACTIONS and not reason)
             or platform not in PLATFORM_NAMES
             or not external_id
         ):
@@ -611,6 +641,17 @@ class BotHandlers:
 
         if platform in VACANCY_PLATFORMS and action in ("offer", "redraft"):
             return await query.answer(VACANCY_NOTE, show_alert=True)
+        if action == "nofit":  # пропуск сразу; причина — по желанию, она и учит бота
+            self.storage.set_status(platform, external_id, "skipped", "не подходит")
+            await query.answer()
+            await query.edit_message_reply_markup(reply_markup=None)
+            await query.message.reply_text(
+                NOFIT_PROMPT.format(title=_short_title(p.title)),
+                reply_markup=_markup(nofit_keyboard(p)),
+            )
+            return
+        if action.startswith("nf-"):
+            return await self._learn(query, action.removeprefix("nf-"), p)
         if action == "pick":
             await query.answer("Готовлю отклик…" if platform not in VACANCY_PLATFORMS else None)
             await self._respond(query.message, platform, external_id)
@@ -648,7 +689,38 @@ class BotHandlers:
         await query.answer("Отмечено: откликнулся" if status == "applied" else "Пропущено")
         await query.edit_message_reply_markup(reply_markup=None)
         if status == "applied":  # всплывающая подсказка легко теряется — подтверждаем в чате
-            await query.message.reply_text(format_applied(p), parse_mode=ParseMode.HTML)
+            learned = self.pipeline.learn("applied", platform, external_id)
+            changes = learned[0] if learned else []
+            await query.message.reply_text(format_applied(p, changes), parse_mode=ParseMode.HTML)
+
+    async def _learn(self, query: Any, reason: str, p: Project) -> None:
+        """Причина «не подходит» → правило; нечего запомнить — подсказка, кнопки остаются."""
+        learned = self.pipeline.learn(reason, p.platform, p.external_id)
+        changes, removed = learned or ([], 0)
+        if not changes:
+            return await query.answer(nothing_to_learn(reason), show_alert=True)
+        await query.answer("Запомнил")
+        await query.edit_message_text(
+            format_learned(reason, changes, removed, self.settings.min_score),
+            parse_mode=ParseMode.HTML,
+        )
+
+    async def _unlearn(self, query: Any, which: str) -> None:
+        """Кнопка в /learned: забыть одно правило или все; список обновляется на месте."""
+        key = self.pipeline.owner_key
+        if which == "all":
+            self.storage.clear_lessons(key)
+            await query.answer("Забыл все отметки")
+        elif which.isdigit() and self.storage.delete_lesson(key, int(which)):
+            await query.answer("Забыл")
+        else:
+            return await query.answer("Это правило уже снято")
+        lessons = self.storage.lessons(key)
+        await query.edit_message_text(
+            format_lessons(lessons),
+            parse_mode=ParseMode.HTML,
+            reply_markup=_markup(lessons_keyboard(lessons)),
+        )
 
 
 def build_application(settings: Settings, storage: Storage, pipeline: Pipeline) -> Application:
@@ -672,6 +744,7 @@ def build_application(settings: Settings, storage: Storage, pipeline: Pipeline) 
         ("stats", handlers.stats),
         ("last", handlers.last),
         ("new", handlers.new),
+        ("learned", handlers.learned),
         ("signup", handlers.signup),
         ("profile", handlers.profile),
         ("forget", handlers.forget),

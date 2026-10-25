@@ -15,6 +15,7 @@ import re
 from collections.abc import Iterable
 from datetime import datetime
 
+from freelance_bot import learning
 from freelance_bot.config import Settings
 from freelance_bot.models import Project, ScoreResult
 
@@ -326,8 +327,12 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
     for item in performer:
         reasons.append(f"⚠ требование: {item} (−{settings.requirement_penalty})")
 
+    # отметки пользователя (ADR 0013): «не моя тема», «офис», «откликнулся»…
+    lessons = learning.apply(p, settings.lessons)
+    reasons.extend(lessons.reasons)
+
     total = relevance + bonus + freshness + budget + offers + hired_adjust - penalty
-    score = max(0, min(100, round(total)))
+    score = max(0, min(100, round(total + lessons.points)))
 
     # отсечение
     excluded: str | None = None
@@ -360,6 +365,8 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
         strong_profile = bool(ordered) and ordered[0] >= 1.0
         if _find_terms(full_text, settings.exclusions.get(MILITARY_KEY, [])):
             excluded = _EXCLUSION_LABELS[MILITARY_KEY]
+        elif lessons.excluded:
+            excluded = lessons.excluded
         elif (php_in_title and not profile_in_title) or (
             php_points >= MIN_STOP_POINTS and php_outweighs
         ):

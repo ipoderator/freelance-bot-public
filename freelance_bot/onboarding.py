@@ -317,12 +317,15 @@ def first_matches(
     limit: int = FIRST_MATCHES_LIMIT,
     *,
     include_private: bool = False,
+    tg_id: int | None = None,
 ) -> list[tuple[Project, ScoreResult]]:
     """Подходящие анкете заказы из собранных за FIRST_MATCHES_WINDOW: свежие первыми.
     Балл — на момент публикации, как в /last, чтобы возраст не отсекал открытый заказ.
     Статусы в базе — владельца (откликнулся, пропустил), поэтому не учитываются.
     `include_private` — владельцу его же HH."""
     own = user_settings(data, settings)
+    if tg_id is not None:  # свои отметки «не подходит» (ADR 0013)
+        own = replace(own, lessons=tuple(storage.lessons(tg_id)))
     platforms = set(data.get("platforms") or []) & set(settings.signup_platforms)
     if not include_private:
         platforms -= PRIVATE_PLATFORMS
@@ -708,7 +711,7 @@ class Onboarding:
         try:
             items = first_matches(
                 user.data, self.settings, self.storage, datetime.now(UTC), limit,
-                include_private=user.tg_id == self.settings.owner_id,
+                include_private=user.tg_id == self.settings.owner_id, tg_id=user.tg_id,
             )  # fmt: skip
             if not items:
                 return await reply(f"{MATCHES_NONE}\n\n{later}", None)

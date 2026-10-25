@@ -57,12 +57,19 @@ class FakeQuery:
         self.message = message
         self.answers: list[str] = []
         self.markup_cleared = False
+        self.edited: list[str] = []
+        self.edited_markup = None
 
     async def answer(self, text=None, show_alert=False):
         self.answers.append(text or "")
+        self.alert = show_alert
 
     async def edit_message_reply_markup(self, reply_markup=None):
         self.markup_cleared = reply_markup is None
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edited.append(text)
+        self.edited_markup = kwargs.get("reply_markup")
 
 
 def update_from(user_id, callback_data=None, text=None):
@@ -435,7 +442,7 @@ async def test_menu_buttons_and_menu_command_show_persistent_keyboard(env):
     assert "👋" in message.replies[0]
     keyboard = message.markups[0].keyboard
     assert [[b.text for b in row] for row in keyboard] == [
-        ["🆕 Новые", "📋 Все заказы"], ["📊 Статистика", "⚙️ Статус"],
+        ["🆕 Новые", "📋 Все заказы"], ["📊 Статистика", "⚙️ Статус"], ["🧠 Обучение"],
     ]
     for label, expected in (("📋 Все заказы", "Подходящие заказы"),
                             ("📊 Статистика", "Сегодня"), ("⚙️ Статус", "Статус")):
@@ -633,7 +640,7 @@ async def test_setup_telegram_registers_commands_and_prints_user_id():
     assert code == 0
     assert [c for c, _ in bot.commands] == [
         "start", "menu", "status", "pause", "resume", "filters", "stats", "last", "new",
-        "signup",
+        "learned", "signup",
     ]
     assert "@my_freelance_bot" in text
     assert "TELEGRAM_OWNER_ID=555" in text
@@ -834,3 +841,95 @@ def test_max_age_flag_overrides_platform_own_age(tmp_path):
     )  # fmt: skip
     s = cli._load(args)
     assert s.max_age_for("superjob") == s.max_age_for("fl") == 48
+
+
+async def test_nofit_asks_reason_learns_and_explains(env, make_project):
+    from freelance_bot.scoring import score_project
+
+    v = make_project(
+        platform="superjob", external_id="s1", url="https://www.superjob.ru/vakansii/s1.html",
+        title="Бизнес-аналитик", description="Python, SQL, отчёты.", published_at=NOW,
+        budget_min=60000, budget_max=None, offers_count=None,
+        extra={"company": "Ромашка", "area": "Москва"},
+    )  # fmt: skip
+    env.storage.upsert_project(v)
+    update, message, query = update_from(OWNER, "nofit:superjob:s1")
+    await env.handlers.button(update, None)
+    assert env.storage.get_status("superjob", "s1") == "skipped"  # пропуск сразу
+    assert query.markup_cleared
+    assert message.replies == [
+        "Чем не подходит «Бизнес-аналитик»? Выберите причину — я запомню и поменяю отбор."
+    ]
+    reasons = [b.callback_data for row in message.markups[0].inline_keyboard for b in row]
+    assert reasons == [
+        "nf-topic:superjob:s1", "nf-pay:superjob:s1", "nf-office:superjob:s1",
+        "nf-company:superjob:s1", "nf-level:superjob:s1",
+    ]  # fmt: skip
+
+    update, message, query = update_from(OWNER, "nf-level:superjob:s1")
+    await env.handlers.button(update, None)
+    assert query.alert and "нет уровня" in query.answers[0]  # нечего запомнить — подсказка
+    assert query.edited == [] and env.storage.lessons(OWNER) == []
+
+    # такая же вакансия ждёт дайджеста — после отметки она в него не попадёт
+    twin = replace_project(v, external_id="s2", title="Системный аналитик")
+    env.storage.upsert_project(twin)
+    env.storage.set_status("superjob", "s2", "queued")
+    env.storage.save_score("superjob", "s2", score_project(twin, env.settings, NOW))
+    update, message, query = update_from(OWNER, "nf-topic:superjob:s1")
+    await env.handlers.button(update, None)
+    assert query.answers == ["Запомнил"]
+    [text] = query.edited
+    assert text.startswith("🧠 <b>Запомнил</b> — 🧭 Не моя тема:")
+    assert "• «аналитик» в названии: −15 к баллу" in text
+    assert "Из ближайшего списка новых убрал похожих: 1." in text
+    assert "/learned" in text
+    assert {x.value for x in env.storage.lessons(OWNER)} == {"бизнес", "аналитик"}
+    assert env.storage.get_status("superjob", "s2") == "filtered_out"
+
+
+def replace_project(p, **kw):
+    from dataclasses import replace
+
+    return replace(p, **kw)
+
+
+async def test_learned_lists_lessons_and_forgets_them(env):
+    update, message, _ = update_from(OWNER)
+    await env.handlers.learned(update, None)
+    assert "Пока отметок нет" in message.replies[0]
+    assert "👎 Не подходит" in message.replies[0]  # объяснение, как учить бота
+
+    env.storage.save_lesson(OWNER, "topic", "аналитик", -20, "Бизнес-аналитик")
+    env.storage.save_lesson(OWNER, "company", "ромашка", 0, "Аналитик")
+    update, message, _ = update_from(OWNER, text="🧠 Обучение")  # кнопка меню
+    await env.handlers.text(update, None)
+    assert "1. вакансии компании «ромашка» не присылаю" in message.replies[0]
+    assert "2. «аналитик» в названии: −20 к баллу" in message.replies[0]
+    buttons = [b.callback_data for row in message.markups[0].inline_keyboard for b in row]
+    first = env.storage.lessons(OWNER)[0].id
+    second = env.storage.lessons(OWNER)[1].id
+    assert buttons == [f"unlearn:{first}", f"unlearn:{second}", "unlearn:all"]
+
+    update, _, query = update_from(OWNER, f"unlearn:{first}")
+    await env.handlers.button(update, None)
+    assert query.answers == ["Забыл"] and "ромашка" not in query.edited[0]
+    assert [x.value for x in env.storage.lessons(OWNER)] == ["аналитик"]
+
+    update, _, query = update_from(OWNER, "unlearn:all")
+    await env.handlers.button(update, None)
+    assert env.storage.lessons(OWNER) == [] and "Пока отметок нет" in query.edited[0]
+
+    update, _, query = update_from(999, "unlearn:all")  # чужой — отказ
+    await env.handlers.button(update, None)
+    assert query.edited == []
+
+
+async def test_filters_and_menu_tell_how_learning_works(env):
+    env.storage.save_lesson(OWNER, "office", "", -15, "Аналитик")
+    update, message, _ = update_from(OWNER)
+    await env.handlers.filters_(update, None)
+    assert "🧠 Правил из ваших отметок: 1" in message.replies[0]
+    update, message, _ = update_from(OWNER)
+    await env.handlers.menu(update, None)
+    assert "👎 Не подходит" in message.replies[0] and "🧠 Обучение" in message.replies[0]

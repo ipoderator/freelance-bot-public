@@ -115,7 +115,7 @@ async def test_new_strong_project_is_notified_with_draft_and_recorded(
     assert len(notifier.cards) == 1
     assert "Telegram-бот на Python" in notifier.cards[0][0]
     assert [btn[1] for row in notifier.cards[0][1] for btn in row] == [
-        "applied:fl:10", "skip:fl:10", "offer:fl:10", "redraft:fl:10",
+        "applied:fl:10", "skip:fl:10", "offer:fl:10", "redraft:fl:10", "nofit:fl:10",
     ]
     assert len(notifier.texts) == 1 and "Черновик отклика" in notifier.texts[0]
     assert "📝 Нужен telegram бот, backend на Python" in notifier.cards[0][0]
@@ -539,3 +539,23 @@ async def test_fixed_price_from_settings_is_not_replaced_by_estimate(
     assert "оценка бота" not in notifier.texts[0]
     redrafted = await pipeline.redraft("fl", "21")
     assert redrafted.draft.text == "Стоимость: 7 000 ₽, срок: 2 дня. v1"
+
+
+async def test_owner_lessons_apply_to_collection(settings, storage, make_project):
+    owner = replace(settings, owner_id=4242)
+    a = make_project(external_id="20", published_at=NOW - timedelta(hours=1), **STRONG)
+    b = make_project(
+        external_id="21", published_at=NOW - timedelta(hours=1),
+        **{**STRONG, "title": "Telegram-бот на Python для интернет-магазина"},
+    )  # fmt: skip
+    storage.save_lesson(4242, "pay", "order", 60000, "Дешёвый бот")  # бюджеты по 60 000
+    storage.save_lesson(1, "pay", "order", 1_000_000, "чужое правило")  # не владельца
+    pipeline, notifier = make_pipeline(owner, storage, [FakeSource("fl", [a, b])])
+
+    report = await pipeline.run_once()
+
+    assert (report.fetched, report.passed, report.notified) == (2, 0, 0)
+    assert storage.get_status("fl", "20") == "filtered_out"
+    reason = storage.get_score("fl", "20").excluded_reason
+    assert reason == "мало платят: по вашей отметке — не выше 60 000 ₽"
+    assert notifier.cards == []

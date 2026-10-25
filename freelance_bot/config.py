@@ -15,7 +15,7 @@ from typing import Any
 
 from dotenv import dotenv_values
 
-from freelance_bot.models import MODES, PLATFORMS, Mode, Platform
+from freelance_bot.models import MODES, PLATFORMS, Lesson, Mode, Platform
 
 MIN_INTERVAL_SEC = 60
 MIN_DIGEST_INTERVAL_MIN = 15  # чаще — уже не дайджест, а поток карточек
@@ -125,6 +125,9 @@ class Settings:
     public_enabled: bool = False
     # Площадки, которые анкета предлагает новым пользователям (кнопка «Везде» — все они)
     public_platforms: tuple[Platform, ...] = ()
+    # Правила из отметок пользователя (learning.py, ADR 0013): из settings.toml не читаются,
+    # их подставляет Pipeline (владелец) или анкета (пользователь) из таблицы lessons
+    lessons: tuple[Lesson, ...] = ()
 
     @property
     def signup_platforms(self) -> tuple[Platform, ...]:

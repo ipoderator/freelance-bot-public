@@ -342,6 +342,19 @@ def test_user_settings_take_directions_and_experience_from_signup(env):
                          datetime.now(UTC)) == []  # fmt: skip
 
 
+def test_first_matches_use_only_this_users_lessons(env, make_project):
+    now = datetime.now(UTC)
+    p = make_project(external_id="m1", published_at=now - timedelta(hours=1))
+    env.storage.upsert_project(p)
+    data = {"directions": ["backend", "telegram"], "platforms": ["fl"]}
+    found = first_matches(data, env.settings, env.storage, now, tg_id=GUEST)
+    assert [x.external_id for x, _ in found] == ["m1"]
+    env.storage.save_lesson(GUEST + 1, "pay", "order", 1_000_000, "чужое")
+    assert first_matches(data, env.settings, env.storage, now, tg_id=GUEST) == found
+    env.storage.save_lesson(GUEST, "pay", "order", 1_000_000, "своё")
+    assert first_matches(data, env.settings, env.storage, now, tg_id=GUEST) == []
+
+
 async def test_decline_saves_nothing(env):
     chat = Chat(env.handlers, GUEST)
     await chat.command("start")

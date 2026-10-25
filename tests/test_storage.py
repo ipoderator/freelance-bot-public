@@ -246,3 +246,44 @@ def test_latest_response_and_recent_projects(storage: Storage, make_project) -> 
     assert [p.external_id for p in storage.recent_projects(since - timedelta(hours=1))] == [
         "2", "1", "3",
     ]
+
+
+def test_lessons_table_migrates_from_previous_version(tmp_path: Path) -> None:
+    from freelance_bot.storage import MIGRATIONS
+
+    db = tmp_path / "old.sqlite3"
+    with sqlite3.connect(db) as conn:
+        for script in MIGRATIONS[:-1]:
+            conn.executescript(script)
+        conn.execute(f"PRAGMA user_version = {len(MIGRATIONS) - 1}")
+        conn.execute(
+            "INSERT INTO users (tg_id, step, data, created_at, updated_at) "
+            "VALUES (7, 'done', '{}', 'x', 'x')"
+        )
+    storage = Storage(db)
+    assert storage.get_user(7) is not None  # данные целы
+    storage.save_lesson(7, "topic", "аналитик", -10, "Бизнес-аналитик")
+    storage.save_lesson(7, "topic", "аналитик", -20, "Системный аналитик")
+    [lesson] = storage.lessons(7)
+    assert (lesson.weight, lesson.hits, lesson.example) == (-20, 2, "Системный аналитик")
+    with pytest.raises(sqlite3.IntegrityError):
+        storage.save_lesson(7, "nonsense", "x", 0, "")
+    storage.close()
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS)
+
+
+def test_lessons_are_per_user_and_forget_deletes_them(storage: Storage) -> None:
+    storage.save_user(7, "done", {})
+    storage.save_lesson(7, "company", "ромашка", 0, "Аналитик")
+    storage.save_lesson(7, "office", "", -15, "Аналитик")
+    storage.save_lesson(8, "topic", "педагог", -10, "Педагог")
+    assert [x.kind for x in storage.lessons(7)] == ["company", "office"]
+
+    first = storage.lessons(7)[0]
+    assert storage.delete_lesson(8, first.id) is False  # чужое правило не удаляется
+    assert storage.delete_lesson(7, first.id) is True
+    assert storage.delete_user(7) is True
+    assert storage.lessons(7) == []
+    assert [x.value for x in storage.lessons(8)] == ["педагог"]
+    assert storage.clear_lessons(8) == 1 and storage.lessons(8) == []

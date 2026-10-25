@@ -239,6 +239,10 @@ class Storage:
     def _now(self) -> str:
         return _utc_iso(self._clock())
 
+    def now(self) -> datetime:
+        """Часы базы: по ним пишутся события, по ним же и считать от них периоды."""
+        return self._clock()
+
     def _today_start(self) -> str:
         local_day = self._clock().astimezone(self._tz).date()
         return _utc_iso(datetime.combine(local_day, time.min, tzinfo=self._tz))

@@ -69,14 +69,17 @@ from freelance_bot.telegram_ui import (
     MAX_MESSAGE_LEN,
     MENU_ALL,
     MENU_LEARNED,
+    MENU_LEGACY,
     MENU_NEW,
     MENU_ROWS,
     MENU_STATS,
     MENU_STATUS,
     NOFIT_PROMPT,
     PLATFORM_NAMES,
+    STATS_RESET_QUESTION,
     VACANCY_NOTE,
     VACANCY_PLATFORMS,
+    fmt_time,
     format_applied,
     format_filters,
     format_learned,
@@ -94,6 +97,7 @@ from freelance_bot.telegram_ui import (
     nofit_keyboard,
     offer_list_keyboard,
     selection_reason,
+    stats_keyboard,
     vacancy_link_label,
 )
 
@@ -101,14 +105,14 @@ log = logging.getLogger(__name__)
 
 COMMANDS: list[tuple[str, str]] = [
     ("start", "Анкета: заполнить или посмотреть"),
-    ("menu", "Меню: новые и все заказы, статистика, статус"),
+    ("menu", "Меню: новые и все предложения, статистика, состояние бота"),
     ("status", "Работает ли бот, последний сбор, ошибки"),
     ("pause", "Поставить сбор и уведомления на паузу"),
     ("resume", "Снять паузу"),
     ("filters", "Текущие фильтры и режимы"),
     ("stats", "Статистика за сегодня и 7 дней"),
-    ("last", "Подходящие заказы: выбрать и получить готовый отклик"),
-    ("new", "Новые заказы, которых ещё не присылал"),
+    ("last", "Все подходящие предложения: выбрать и получить отклик"),
+    ("new", "Новые предложения, которых ещё не присылал"),
     ("learned", "Чему бот научился по отметкам «Не подходит»"),
     ("signup", "Заполнить анкету заново"),
 ]
@@ -132,6 +136,7 @@ LAST_LIST_FLAG = "last_list"  # "<platform>:<id>,…" — заказы посл�
 MAX_OFFER_DAYS = 365
 MAX_OFFER_TEXT = 40  # «15 000 руб., 14 дней» — 21 символ
 MENU_VERSION_FLAG = "menu_version"
+STATS_RESET_FLAG = "stats_reset_at"  # с какого момента считать /stats (UTC ISO)
 DIGEST_LAST_FLAG = "digest_last_at"  # когда прислан последний список новых (UTC ISO)
 DIGEST_TICK_SEC = 60  # как часто проверять, не пора ли список: расписание анкеты меняется
 DIGEST_LIMIT = 15  # карточек в одном списке новых: остальные — в следующем
@@ -141,7 +146,7 @@ NOFIT_TITLE_MAX = 60
 LETTER_NAME_NOTE = (
     "⚠ Подпись — ФИО из анкеты, а в резюме — «{name}». Проверьте письмо перед отправкой."
 )
-MENU_VERSION = "2"  # новое меню — новая версия: бот один раз пришлёт его сам после запуска
+MENU_VERSION = "3"  # новое меню — новая версия: бот один раз пришлёт его сам после запуска
 MENU_MARKUP = ReplyKeyboardMarkup(
     [list(row) for row in MENU_ROWS], resize_keyboard=True, is_persistent=True
 )
@@ -470,12 +475,40 @@ class BotHandlers:
     async def stats(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return await self._deny(update)
-        now = datetime.now(UTC)
+        await self._reply(update, self._stats_text(), _markup(stats_keyboard()))
+
+    def _stats_text(self) -> str:
+        """Сегодня и 7 дней, но не раньше сброса: события не удаляются, сдвигается начало."""
+        now = self.storage.now()
         local = now.astimezone(ZoneInfo(self.settings.timezone))
         day_start = local.replace(hour=0, minute=0, second=0, microsecond=0)
-        today = self.storage.stats(day_start)
-        week = self.storage.stats(now - timedelta(days=7))
-        await self._reply(update, format_stats(today, week))
+        week_start = now - timedelta(days=7)
+        reset = self.storage.get_flag(STATS_RESET_FLAG)
+        reset_at = datetime.fromisoformat(reset) if reset else None
+        if reset_at is None or reset_at <= week_start:
+            reset_at = None
+        today = self.storage.stats(max(day_start, reset_at or day_start))
+        week = self.storage.stats(reset_at or week_start)
+        shown = fmt_time(reset_at, self.settings.timezone) if reset_at else ""
+        return format_stats(today, week, shown)
+
+    async def _stats_button(self, query: Any, step: str) -> None:
+        """Сброс статистики в два нажатия: «Сбросить» → «Да, сбросить» / «Не сбрасывать»."""
+        if step == "reset":
+            await query.answer()
+            return await query.edit_message_text(
+                STATS_RESET_QUESTION, reply_markup=_markup(stats_keyboard(confirm=True))
+            )
+        if step == "confirm":
+            self.storage.set_flag(STATS_RESET_FLAG, self.storage.now().isoformat())
+            await query.answer("Статистика сброшена")
+        elif step == "keep":
+            await query.answer()
+        else:
+            return await query.answer("Неизвестная кнопка")
+        await query.edit_message_text(
+            self._stats_text(), parse_mode=ParseMode.HTML, reply_markup=_markup(stats_keyboard())
+        )
 
     async def last(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
@@ -497,7 +530,8 @@ class BotHandlers:
         if not sent:
             await self._reply(
                 update,
-                f"Новых заказов пока нет — пришлю сам, как появятся. Все подходящие: {MENU_ALL}.",
+                f"Новых предложений пока нет — пришлю сам, как появятся. Все подходящие: "
+                f"{MENU_ALL}.",
             )
 
     async def send_digest(self, send: Any) -> int:
@@ -542,13 +576,14 @@ class BotHandlers:
         if not self._is_owner(update):
             return await self._deny(update)
         message_text = update.effective_message.text or ""
+        label = message_text.strip()
         menu = {
             MENU_NEW: self.new,
             MENU_ALL: self.last,
             MENU_STATS: self.stats,
             MENU_STATUS: self.status,
             MENU_LEARNED: self.learned,
-        }.get(message_text.strip())
+        }.get(MENU_LEGACY.get(label, label))
         if menu is not None:
             return await menu(update, context)
         if self._owner_in_signup(update):  # меню владельца работает и посреди анкеты
@@ -700,6 +735,8 @@ class BotHandlers:
         action, _, rest = (query.data or "").partition(":")
         if action == "unlearn":
             return await self._unlearn(query, rest)
+        if action == "stats":
+            return await self._stats_button(query, rest)
         platform, _, external_id = rest.partition(":")
         reason = action.startswith("nf-") and action.removeprefix("nf-") in REASONS
         if (

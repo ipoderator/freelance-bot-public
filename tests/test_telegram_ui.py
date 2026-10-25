@@ -174,7 +174,7 @@ def test_status_warns_when_kwork_enabled():
 
 
 def test_offer_list_and_keyboard(make_project):
-    assert "подходящих заказов" in format_offer_list([], "Europe/Moscow")
+    assert "подходящих предложений" in format_offer_list([], "Europe/Moscow")
     items = [
         (make_project(external_id="5", title="Бот <для> CRM" + " очень" * 10), 64),
         (make_project(external_id="6", title="Парсер", extra={"for_all": True}), None),

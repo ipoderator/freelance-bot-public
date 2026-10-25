@@ -48,10 +48,13 @@ BUTTON_NOFIT = "👎 Не подходит"
 BUTTON_LETTER = "✉️ Письмо работодателю"
 BUTTON_LETTER_AGAIN = "🔄 Другое письмо"
 BUTTON_FORGET_ALL = "🗑 Забыть всё"
+BUTTON_STATS_RESET = "🗑 Сбросить статистику"
+BUTTON_STATS_CONFIRM = "Да, сбросить"
+BUTTON_STATS_KEEP = "Не сбрасывать"
 OFFER_EXAMPLE = "15000, 5"
 SUMMARY_MARK = "📝"
-LIST_TITLE = "📋 <b>Подходящие заказы</b> — свежие сверху"
-DIGEST_TITLE = "🆕 <b>Новые заказы</b> — {count}"
+LIST_TITLE = "📋 <b>Подходящие предложения</b> — свежие сверху"
+DIGEST_TITLE = "🆕 <b>Новые предложения</b> — {count}"
 PICK_HINT = "Выберите кнопкой или пришлите номер — пришлю готовый отклик."
 VACANCY_PICK_HINT = (
     "Выберите кнопкой или пришлите номер — пришлю карточку со ссылкой и письмом работодателю."
@@ -66,15 +69,27 @@ DIGEST_MORE = (
 MAX_ALSO_IN = 5  # городов сети в строке вакансии
 
 # Постоянное меню под полем ввода (ReplyKeyboardMarkup): нажатие присылает этот текст
-MENU_NEW = "🆕 Новые"
-MENU_ALL = "📋 Все заказы"
+# «Предложения» — и заказы бирж, и вакансии
+MENU_NEW = "🆕 Новые предложения"
+MENU_ALL = "📋 Все предложения"
 MENU_STATS = "📊 Статистика"
-MENU_STATUS = "⚙️ Статус"
-MENU_LEARNED = "🧠 Обучение"
+MENU_STATUS = "⚙️ Состояние бота"
+MENU_LEARNED = "🧠 Чему я научился"
 MENU_ROWS: tuple[tuple[str, ...], ...] = (
-    (MENU_NEW, MENU_ALL),
+    (MENU_NEW,),
+    (MENU_ALL,),
     (MENU_STATS, MENU_STATUS),
     (MENU_LEARNED,),
+)
+# Подписи прежнего меню: клавиатура у владельца сменится, только когда бот пришлёт новое меню
+MENU_LEGACY = {
+    "🆕 Новые": MENU_NEW,
+    "📋 Все заказы": MENU_ALL,
+    "⚙️ Статус": MENU_STATUS,
+    "🧠 Обучение": MENU_LEARNED,
+}
+STATS_RESET_QUESTION = (
+    "Сбросить статистику? Обнулятся только цифры: заказы, отклики и обучение останутся."
 )
 # Самообучение (ADR 0013): как отметки меняют отбор — в меню, /learned и ответе на отметку
 LEARNING_HOW = (
@@ -369,7 +384,7 @@ def format_offer_list(
     `reasons` — почему отобран каждый заказ (selection_reason)."""
     if not items:
         return (
-            "За последнюю неделю подходящих заказов, на которые вы ещё не откликнулись, нет. "
+            "За последнюю неделю подходящих предложений, на которые вы ещё не откликнулись, нет. "
             "Новые пришлю сам, как только появятся."
         )
     if hint == PICK_HINT and any(is_vacancy(p) for p, _ in items):
@@ -451,7 +466,7 @@ def format_start(
     ]
     if next_digest:
         lines += ["", f"⏰ Новые присылаю сам {esc(when)}, следующий список — {esc(next_digest)}."]
-    lines += ["", f"🧠 {LEARNING_HOW} Чему я научился — {MENU_LEARNED}."]
+    lines += ["", f"🧠 {LEARNING_HOW} Что я запомнил — {MENU_LEARNED}."]
     lines += ["", "Ещё: /filters — фильтры, /pause и /resume — пауза."]
     return "\n".join(lines)
 
@@ -558,8 +573,14 @@ def format_letter(p: Project, text: str, generator: str, variant: int = 0) -> st
     return "\n".join(lines)
 
 
-def format_stats(stats_today: Mapping[str, int], stats_week: Mapping[str, int]) -> str:
-    lines = ["📊 <b>Статистика</b>", "<i>Сегодня / за 7 дней</i>", ""]
+def format_stats(
+    stats_today: Mapping[str, int], stats_week: Mapping[str, int], reset_at: str = ""
+) -> str:
+    """`reset_at` — когда владелец сбросил статистику (время для показа), если за эти 7 дней."""
+    period = "<i>Сегодня / за 7 дней</i>"
+    if reset_at:
+        period = f"<i>Сегодня / за 7 дней, считаю со сброса {esc(reset_at)}</i>"
+    lines = ["📊 <b>Статистика</b>", period, ""]
     for key, icon, label in _STATS_LABELS:
         today, week = stats_today.get(key, 0), stats_week.get(key, 0)
         if key == "sent" and not week:
@@ -570,6 +591,12 @@ def format_stats(stats_today: Mapping[str, int], stats_week: Mapping[str, int]) 
         lines += ["", f"📈 за неделю откликнулись на {applied} из {shown} присланных "
                       f"({round(100 * applied / shown)}%)"]
     return "\n".join(lines)
+
+
+def stats_keyboard(confirm: bool = False) -> list[list[tuple[str, str]]]:
+    if confirm:
+        return [[(BUTTON_STATS_CONFIRM, "stats:confirm"), (BUTTON_STATS_KEEP, "stats:keep")]]
+    return [[(BUTTON_STATS_RESET, "stats:reset")]]
 
 
 def format_filters(settings: Settings) -> str:
@@ -625,9 +652,9 @@ def format_status(
     flags: Mapping[str, str | None],
     next_digest: str | None = None,
 ) -> str:
-    lines = ["⚙️ <b>Статус</b>", "⏸ на паузе — /resume" if paused else "▶️ работает"]
+    lines = ["⚙️ <b>Состояние бота</b>", "⏸ на паузе — /resume" if paused else "▶️ работает"]
     if next_digest and not paused:
-        lines.append(f"⏰ следующий список новых заказов: {esc(next_digest)}")
+        lines.append(f"⏰ следующий список новых предложений: {esc(next_digest)}")
     if settings.dry_run:
         lines.append("dry-run: отправка на биржи отключена")
     lines.append("")

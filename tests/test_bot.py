@@ -99,7 +99,8 @@ def env(make_project):
 
     settings = load_settings(ROOT / "settings.toml", ROOT / "no-such.env")
     settings = replace(settings, owner_id=OWNER, telegram_token=FAKE_TOKEN, digest_enabled=False)
-    storage = Storage(":memory:", clock=lambda: NOW)
+    clock = SimpleNamespace(now=NOW)  # часы базы: тест может их сдвинуть
+    storage = Storage(":memory:", clock=lambda: clock.now)
     pipeline = Pipeline(settings, storage, [], FakeDrafter(), NullNotifier(), clock=lambda: NOW)
     p = make_project(external_id="77")
     storage.upsert_project(p)
@@ -107,7 +108,10 @@ def env(make_project):
 
     storage.save_score("fl", "77", score_project(p, settings, NOW))
     yield SimpleNamespace(
-        settings=settings, storage=storage, handlers=BotHandlers(settings, storage, pipeline)
+        settings=settings,
+        storage=storage,
+        handlers=BotHandlers(settings, storage, pipeline),
+        clock=clock,
     )
     storage.close()
 
@@ -135,7 +139,7 @@ async def test_owner_in_group_chat_gets_refusal(env):
     assert message.replies == ["Этот бот личный. Доступ закрыт."]  # заказы не уходят в группу
     update.effective_chat = SimpleNamespace(type="private")
     await env.handlers.last(update, None)
-    assert "Подходящие заказы" in message.replies[1]
+    assert "Подходящие предложения" in message.replies[1]
 
 
 async def test_nobody_is_owner_when_owner_id_unset(env):
@@ -176,6 +180,34 @@ async def test_filters_and_stats_handlers_reply(env):
     env.storage.set_status("fl", "77", "notified")
     await env.handlers.stats(update, None)
     assert "Сегодня" in message.replies[1] and "7 дней" in message.replies[1]
+    assert "📨 прислано: <b>1</b> / 1" in message.replies[1]
+    assert message.markups[1].inline_keyboard[0][0].callback_data == "stats:reset"
+
+
+async def test_stats_reset_asks_first_then_counts_from_reset(env, make_project):
+    env.storage.set_status("fl", "77", "notified")
+    update, _, query = update_from(OWNER, "stats:reset")
+    await env.handlers.button(update, None)
+    assert "Сбросить статистику?" in query.edited[-1]
+    assert env.storage.get_flag("stats_reset_at") is None  # первое нажатие ничего не сбрасывает
+
+    update, _, query = update_from(OWNER, "stats:keep")
+    await env.handlers.button(update, None)
+    assert "📨 прислано: <b>1</b> / 1" in query.edited[-1]
+
+    env.clock.now = NOW + timedelta(minutes=5)
+    update, _, query = update_from(OWNER, "stats:confirm")
+    await env.handlers.button(update, None)
+    assert query.answers == ["Статистика сброшена"]
+    assert "📨 прислано: <b>0</b> / 0" in query.edited[-1] and "со сброса" in query.edited[-1]
+    assert env.storage.get_status("fl", "77") == "notified"  # заказы и история не тронуты
+
+    env.clock.now = NOW + timedelta(minutes=10)
+    env.storage.upsert_project(make_project(external_id="78"))
+    env.storage.set_status("fl", "78", "notified")  # после сброса счёт идёт заново
+    update, message, _ = update_from(OWNER)
+    await env.handlers.stats(update, None)
+    assert "📨 прислано: <b>1</b> / 1" in message.replies[0]
 
 
 async def test_status_shows_last_ok(env):
@@ -423,17 +455,17 @@ def test_next_digest_follows_hourly_grid_from_start_hour(now_msk, interval, expe
 async def test_new_sends_queued_projects_once(env, make_project):
     env.storage.upsert_project(make_project(external_id="88", title="Новый бот"))
     env.storage.set_status("fl", "88", "queued")
-    update, message, _ = update_from(OWNER, text="🆕 Новые")  # кнопка меню
+    update, message, _ = update_from(OWNER, text="🆕 Новые предложения")  # кнопка меню
     await env.handlers.text(update, None)
     reply = message.replies[0]
-    assert reply.startswith("🆕 <b>Новые заказы</b> — 1") and "Новый бот" in reply
+    assert reply.startswith("🆕 <b>Новые предложения</b> — 1") and "Новый бот" in reply
     assert message.markups[0].inline_keyboard[0][0].callback_data == "pick:fl:88"
     assert env.storage.get_status("fl", "88") == "notified"
     assert env.storage.get_flag(LAST_LIST_FLAG) == "fl:88"  # «1» в чат — этот заказ
 
     update, message, _ = update_from(OWNER)
     await env.handlers.new(update, None)
-    assert message.replies[0].startswith("Новых заказов пока нет")
+    assert message.replies[0].startswith("Новых предложений пока нет")
 
 
 async def test_menu_buttons_and_menu_command_show_persistent_keyboard(env):
@@ -442,10 +474,14 @@ async def test_menu_buttons_and_menu_command_show_persistent_keyboard(env):
     assert "👋" in message.replies[0]
     keyboard = message.markups[0].keyboard
     assert [[b.text for b in row] for row in keyboard] == [
-        ["🆕 Новые", "📋 Все заказы"], ["📊 Статистика", "⚙️ Статус"], ["🧠 Обучение"],
+        ["🆕 Новые предложения"], ["📋 Все предложения"],
+        ["📊 Статистика", "⚙️ Состояние бота"], ["🧠 Чему я научился"],
     ]
-    for label, expected in (("📋 Все заказы", "Подходящие заказы"),
-                            ("📊 Статистика", "Сегодня"), ("⚙️ Статус", "Статус")):
+    for label, expected in (("📋 Все предложения", "Подходящие предложения"),
+                            ("📊 Статистика", "Сегодня"), ("⚙️ Состояние бота", "Состояние бота"),
+                            # прежние подписи: клавиатура у владельца ещё старая
+                            ("📋 Все заказы", "Подходящие предложения"),
+                            ("⚙️ Статус", "Состояние бота"), ("🧠 Обучение", "Чему я научился")):
         update, message, _ = update_from(OWNER, text=label)
         await env.handlers.text(update, None)
         assert expected in message.replies[0], label
@@ -532,7 +568,7 @@ async def test_last_lists_projects_waiting_for_response(env, make_project):
     pipeline.settings = replace(pipeline.settings, sources=sources)
     update, message, _ = update_from(OWNER)
     await env.handlers.last(update, None)  # у «77» отклик платный — в список не идёт
-    assert "подходящих заказов" in message.replies[0] and message.markups[0] is None
+    assert "подходящих предложений" in message.replies[0] and message.markups[0] is None
 
     env.storage.upsert_project(
         make_project(external_id="78", title="Бот на Python", extra={"for_all": True})
@@ -552,8 +588,8 @@ async def test_last_lists_projects_waiting_for_response(env, make_project):
     update, message, _ = update_from(OWNER)
     await env.handlers.last(update, None)  # 11 заказов не влезают в одно сообщение — несколько
     assert len(message.replies) > 1 and all(len(r) <= 4000 for r in message.replies)
-    assert message.replies[0].startswith("📋 <b>Подходящие заказы</b>")
-    assert "Подходящие заказы" not in message.replies[1]
+    assert message.replies[0].startswith("📋 <b>Подходящие предложения</b>")
+    assert "Подходящие предложения" not in message.replies[1]
     labels = [row[0].text for kb in message.markups for row in kb.inline_keyboard]
     assert [label.split(".")[0] for label in labels] == [str(n) for n in range(1, 12)]
     assert sum(r.count("📝") for r in message.replies) == 11
@@ -935,7 +971,7 @@ async def test_filters_and_menu_tell_how_learning_works(env):
     assert "🧠 Правил из ваших отметок: 1" in message.replies[0]
     update, message, _ = update_from(OWNER)
     await env.handlers.menu(update, None)
-    assert "👎 Не подходит" in message.replies[0] and "🧠 Обучение" in message.replies[0]
+    assert "👎 Не подходит" in message.replies[0] and "🧠 Чему я научился" in message.replies[0]
 
 
 async def test_letter_button_writes_letter_then_another(env, make_project):
@@ -1015,7 +1051,7 @@ async def test_digest_is_capped_and_rest_waits(env, make_project):
 
     assert await env.handlers.send_digest(send) == DIGEST_LIMIT
     text = "\n".join(t for t, _ in pages)
-    assert f"Новые заказы</b> — {DIGEST_LIMIT}" in text
+    assert f"Новые предложения</b> — {DIGEST_LIMIT}" in text
     assert "Ещё новых: 5 — пришлю в следующем списке" in pages[-1][0]
     assert len(env.storage.projects_with_status("queued", NOW - timedelta(days=7))) == 5
     assert await env.handlers.send_digest(send) == 5

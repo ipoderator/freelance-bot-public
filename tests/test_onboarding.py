@@ -231,7 +231,7 @@ async def test_full_flow_with_pasted_resume(env):
     assert len(replies) == 2 and replies[1].startswith(MATCHES_NONE)  # база пуста
     # посторонним рассылки по расписанию ещё нет — так и сказано, со ссылкой на кнопку
     assert "Сам присылать новые раз в час, 9:00–21:00 (МСК) начну, когда включим" in replies[1]
-    assert "«🔎 Заказы по анкете» в /start" in replies[1]
+    assert "«🔎 Предложения по анкете» в /start" in replies[1]
 
 
 def _project(platform, external_id, title, hours_ago, description=""):
@@ -303,7 +303,7 @@ async def test_matches_button_lists_all_and_owner_gets_own_hh(env):
     guest = Chat(env.handlers, GUEST)
     await _finish_signup(guest)
     await guest.command("start")
-    assert ("🔎 Заказы по анкете", "ob:matches") in guest.buttons()
+    assert ("🔎 Предложения по анкете", "ob:matches") in guest.buttons()
     pages = await guest.press("ob:matches")
     assert len(pages) > 1 and all(len(p) <= 4096 for p in pages)  # не влезает в одно
     text = "\n".join(pages)
@@ -910,7 +910,7 @@ async def test_stale_button_after_signup_gives_fresh_menu(env):
     await _cook_signup(env, chat, [])
     replies = await chat.press("ob:loc:other")  # кнопка шага, который уже пройден
     assert replies[0] == STALE_TEXT and "💼 Профессия: Повар горячего цеха" in replies[1]
-    assert ("🔎 Заказы по анкете", "ob:matches") in chat.buttons()
+    assert ("🔎 Предложения по анкете", "ob:matches") in chat.buttons()
 
 
 async def test_old_message_edit_error_does_not_break_button(env):

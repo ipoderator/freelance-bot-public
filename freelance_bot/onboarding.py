@@ -8,7 +8,7 @@ experience_custom, directions, platforms, location, frequency, frequency_custom,
 callback_data «ob:<действие>[:<значение>]».
 Сразу после анкеты присылаются первые заказы и вакансии под неё (first_matches): из уже
 собранных и живым поиском SuperJob по профессии и городу из резюме (matching.py, ADR 0014) —
-видно, что поиск работает; полный список — кнопка «Заказы по анкете» в /start. Рассылка по
+видно, что поиск работает; полный список — кнопка «Предложения по анкете» в /start. Рассылка по
 расписанию — следующий этап. Не разработчику IT-направления и биржи фриланса не предлагаются:
 вместо направлений он правит профессию и смежные должности («✏️ Профессия»).
 
@@ -111,7 +111,7 @@ BUTTON_RESTART = "🔄 Заполнить заново"
 BUTTON_FREQUENCY = "⏰ Частота уведомлений"
 BUTTON_OWN_SCHEDULE = "✏️ Свой тайминг"
 BUTTON_FORGET = "🗑 Удалить мои данные"
-BUTTON_MATCHES = "🔎 Заказы по анкете"
+BUTTON_MATCHES = "🔎 Предложения по анкете"
 BUTTON_LOCATION = "📍 Другие города и удалёнка"
 BUTTON_CANCEL = "Отмена"
 
@@ -190,7 +190,7 @@ MATCHES_LATER = (
     "Сам присылать новые {when} ({tz}) начну, когда включим рассылку, — я напишу. Пока список "
     "— кнопка «{button}» в /start."
 )
-MATCHES_LATER_OWNER = "Новые пришлю сам {when} ({tz}) — списком «Новые заказы»."
+MATCHES_LATER_OWNER = "Новые пришлю сам {when} ({tz}) — списком «Новые предложения»."
 APPLIED_TEXT = "✅ Записал: вы откликнулись на «{title}». В списке она больше не появится."
 APPLIED_LEARNED = "\n🧠 Похожие ({words}) теперь будут выше — /learned."
 GONE_TEXT = "Этой вакансии уже нет в вашем списке — откройте его заново: /start."
@@ -801,7 +801,7 @@ class Onboarding:
             return await query.answer(GONE_TEXT, show_alert=True)
         owner = user.tg_id == self.settings.owner_id
         if owner and action != "nr" and self.storage.get_project(platform, external_id):
-            # у владельца это ещё и его собранная вакансия: уйдёт из «Все заказы» и дайджеста
+            # у владельца это ещё и его собранная вакансия: уйдёт из «Все предложения» и дайджеста
             status = "applied" if action == "ap" else "skipped"
             self.storage.set_status(platform, external_id, status, "кнопка под анкетой")
         if action == "ap":

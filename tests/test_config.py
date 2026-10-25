@@ -357,3 +357,20 @@ def test_freelance_ru_and_workzilla_sources_and_session(tmp_path: Path) -> None:
     path.write_text(base + '\n[sources.work24]\ncategories = ["x"]\n', "utf-8")
     with pytest.raises(ConfigError, match="только для sources.freelance_ru"):
         load_settings(path, env_file=tmp_path / "none.env")
+
+
+def test_source_max_age_overrides_general_only_for_its_platform(tmp_path: Path) -> None:
+    path = write_settings(tmp_path)
+    base = path.read_text("utf-8")
+    s = load_settings(path, env_file=tmp_path / "none.env")
+    assert s.sources["superjob"].max_age_hours is None
+    assert s.max_age_for("superjob") == s.max_age_for("fl") == 6
+
+    path.write_text(base + "\n[sources.superjob]\nenabled = true\nmax_age_hours = 72\n", "utf-8")
+    s = load_settings(path, env_file=tmp_path / "none.env")
+    assert s.max_age_for("superjob") == 72 and s.max_age_for("fl") == 6
+
+    for bad in ("0", "-1", '"72"'):
+        path.write_text(base + f"\n[sources.superjob]\nmax_age_hours = {bad}\n", "utf-8")
+        with pytest.raises(ConfigError, match="sources.superjob.max_age_hours"):
+            load_settings(path, env_file=tmp_path / "none.env")

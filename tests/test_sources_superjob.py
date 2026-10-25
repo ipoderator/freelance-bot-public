@@ -67,10 +67,45 @@ async def test_fresh_vacancies_from_api():
     assert request.url.path == "/2.0/vacancies/"
     params = request.url.params
     assert params["keyword"] == "python" and params["order_field"] == "date"
-    assert params["count"] == "100"
+    assert params["count"] == "40" and params["page"] == "0"
+    assert len(requests) == 1  # «more: false» — вторую страницу не просим
     assert int(params["date_published_from"]) == int((NOW - timedelta(hours=6)).timestamp())
     assert "catalogues" not in params and "place_of_work" not in params
 
+
+
+async def test_pages_until_more_is_false():
+    rows = json.loads(FIXTURE)["objects"]
+    fresh = [r for r in rows if r.get("id") in (51000001, 51000002, 51000003)]
+    pages = [
+        {"objects": fresh[:2], "total": 3, "more": True},
+        {"objects": fresh[2:], "total": 3, "more": False},
+    ]
+    seen: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        page = int(request.url.params["page"])
+        seen.append(request.url.params["page"])
+        return httpx.Response(200, json=pages[page])
+
+    projects = await _source(handler).fetch()
+    assert seen == ["0", "1"]
+    assert {p.external_id for p in projects} == {"51000001", "51000002", "51000003"}
+
+
+async def test_paging_stops_at_max_pages():
+    from freelance_bot.sources import superjob
+
+    calls: list[int] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(int(request.url.params["page"]))
+        row = json.loads(FIXTURE)["objects"][0] | {"id": 52000000 + len(calls)}
+        return httpx.Response(200, json={"objects": [row], "more": True})
+
+    projects = await _source(handler).fetch()
+    assert calls == list(range(superjob.MAX_PAGES))
+    assert len(projects) == superjob.MAX_PAGES
 
 def test_salary_variants():
     rows = json.loads(FIXTURE)["objects"]

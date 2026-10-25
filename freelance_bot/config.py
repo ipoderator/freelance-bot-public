@@ -74,6 +74,8 @@ class SourceSettings:
     queries: list[str] = field(default_factory=list)
     catalogues: list[int] = field(default_factory=list)
     remote_only: bool = False
+    # Свой срок свежести, ч (вакансии открыты дольше заказов); None — general.max_age_hours
+    max_age_hours: float | None = None
 
 
 @dataclass(frozen=True)
@@ -131,6 +133,13 @@ class Settings:
         return tuple(
             p for p in self.public_platforms if p in self.sources and self.sources[p].enabled
         )
+
+    def max_age_for(self, platform: str) -> float:
+        """Срок свежести площадки: свой `sources.<p>.max_age_hours` или общий."""
+        src = self.sources.get(platform)  # type: ignore[call-overload]
+        if src is not None and src.max_age_hours is not None:
+            return src.max_age_hours
+        return self.max_age_hours
 
     @property
     def has_llm_key(self) -> bool:
@@ -321,8 +330,18 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
             queries=queries,
             catalogues=catalogues,
             remote_only=remote_only,
+            max_age_hours=_source_max_age(table, prefix),
         )
     return sources
+
+
+def _source_max_age(table: dict[str, Any], prefix: str) -> float | None:
+    if "max_age_hours" not in table:
+        return None
+    hours = _number(table, "max_age_hours", f"{prefix}.max_age_hours", 0)
+    if hours == 0:
+        raise ConfigError(f"{prefix}.max_age_hours: нужно число часов больше 0")
+    return hours
 
 
 def _parse_superjob(

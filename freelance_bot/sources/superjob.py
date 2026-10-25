@@ -5,8 +5,8 @@
 пользователя API отдаёт вакансии в открытом доступе — этого достаточно, контакты не нужны.
 
 За цикл — по запросу на каждое слово из `queries` (свежие сверху, не старше max_age_hours,
-до 100 за запрос); лимит API — 120 запросов в минуту с IP. Вакансия — как у HH: карточка без
-черновика, отклик пользователь делает на сайте.
+постранично по PAGE_SIZE, до MAX_PAGES страниц); лимит API — 120 запросов в минуту с IP.
+Вакансия — как у HH: карточка без черновика, отклик пользователь делает на сайте.
 """
 
 from __future__ import annotations
@@ -26,7 +26,10 @@ from freelance_bot.sources import SourceFormatError
 
 SITE = "SuperJob"
 API_URL = "https://api.superjob.ru/2.0/vacancies/"
-PAGE_SIZE = 100  # больше API не отдаёт за запрос
+# API отдаёт не больше 40 за запрос: на count=100 — 40 из 59 и «more: false», остальное
+# теряется (проверено 2026-10-25); на 40 «more» честный — листаем, пока он true.
+PAGE_SIZE = 40
+MAX_PAGES = 5  # до 200 вакансий на слово за цикл
 CATEGORY = "Вакансия SuperJob"
 REMOTE_PLACE = 2  # place_of_work: «на дому» — удалённая работа
 KEY_HINT = (
@@ -74,12 +77,24 @@ class SuperJobSource:
         return sorted(found.values(), key=lambda p: p.published_at, reverse=True)
 
     async def _search(self, query: str, since: datetime) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for page in range(MAX_PAGES):
+            objects, more = await self._page(query, since, page)
+            rows.extend(objects)
+            if not more or not objects:
+                break
+        return rows
+
+    async def _page(
+        self, query: str, since: datetime, page: int
+    ) -> tuple[list[dict[str, Any]], bool]:
         params: dict[str, Any] = {
             "keyword": query,
             "order_field": "date",
             "order_direction": "desc",
             "date_published_from": int(since.timestamp()),
             "count": PAGE_SIZE,
+            "page": page,
         }
         if self._catalogues:
             params["catalogues"] = ",".join(str(c) for c in self._catalogues)
@@ -100,7 +115,7 @@ class SuperJobSource:
         objects = data.get("objects") if isinstance(data, dict) else None
         if not isinstance(objects, list):
             raise SourceFormatError(f"{SITE}: в ответе API нет списка objects")
-        return [o for o in objects if isinstance(o, dict)]
+        return [o for o in objects if isinstance(o, dict)], data.get("more") is True
 
 
 def parse_vacancy(row: dict[str, Any]) -> Project | None:

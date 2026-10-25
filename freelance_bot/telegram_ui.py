@@ -409,6 +409,11 @@ def format_filters(settings: Settings) -> str:
     lines = ["🎯 <b>Фильтры</b>"]
     lines.append(
         f"min_score: {settings.min_score}; макс. возраст проекта: {settings.max_age_hours:g} ч"
+        + "".join(
+            f", {PLATFORM_NAMES.get(p, p)}: {s.max_age_hours:g} ч"
+            for p, s in settings.sources.items()
+            if s.max_age_hours is not None
+        )
     )
     lines.append("")
     lines.append("🧭 <b>Направления</b>")

@@ -283,7 +283,8 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
 
     # свежесть
     age_hours = max(0.0, (now - p.published_at).total_seconds() / 3600)
-    freshness = FRESHNESS_MAX * max(0.0, 1.0 - age_hours / settings.max_age_hours)
+    max_age = settings.max_age_for(p.platform)
+    freshness = FRESHNESS_MAX * max(0.0, 1.0 - age_hours / max_age)
 
     # бюджет
     amounts = [v for v in (p.budget_min, p.budget_max) if v]
@@ -330,7 +331,7 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
 
     # отсечение
     excluded: str | None = None
-    if age_hours > settings.max_age_hours:
+    if age_hours > max_age:
         excluded = "устарел"
     else:
         best_stop, best_label = 0, ""

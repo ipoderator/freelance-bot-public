@@ -823,3 +823,14 @@ def test_freelance_ru_and_workzilla_sources_check_their_own_platform(make_projec
     assert frl._known("13419") and not frl._known("27")
     assert not wz._known("27")  # id другой площадки — не «известное» задание
     storage.close()
+
+
+def test_max_age_flag_overrides_platform_own_age(tmp_path):
+    import argparse
+
+    args = argparse.Namespace(
+        settings=str(ROOT / "settings.toml"), env_file=str(tmp_path / "none.env"), db=None,
+        dry_run=True, max_age_hours=48.0,
+    )  # fmt: skip
+    s = cli._load(args)
+    assert s.max_age_for("superjob") == s.max_age_for("fl") == 48

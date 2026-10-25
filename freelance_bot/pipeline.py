@@ -169,7 +169,7 @@ class Pipeline:
         report.fetched = len(projects)
 
         bootstrap = self.storage.get_flag(f"bootstrapped:{platform}") is None
-        cutoff = now - timedelta(hours=self.settings.max_age_hours)
+        cutoff = now - timedelta(hours=self.settings.max_age_for(platform))
         candidates: list[tuple[Project, ScoreResult]] = []
         for p in projects:
             if not self.storage.upsert_project(p):

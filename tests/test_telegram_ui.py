@@ -278,3 +278,15 @@ def test_offer_list_shows_reason_and_work24_offer_has_tips(make_project) -> None
     assert "🎯 Telegram-боты (бот для)" in out and "Work24" in out
     offer = format_offer(p, Draft("Текст", "llm", False, False), [], 5000, 3)
     assert "штрафует на 500 ₽" in offer
+
+
+def test_filters_show_platform_own_max_age():
+    from dataclasses import replace
+
+    s = load_settings(ROOT / "settings.toml", ROOT / "no-such.env")
+    sources = {
+        p: replace(src, max_age_hours=72 if p == "superjob" else None)
+        for p, src in s.sources.items()
+    }
+    out = format_filters(replace(s, max_age_hours=6, sources=sources))
+    assert "макс. возраст проекта: 6 ч, SuperJob: 72 ч" in out

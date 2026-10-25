@@ -344,8 +344,9 @@ API отвечает и на честный User-Agent бота (`freelance-bot/
 | [Документация API](https://api.superjob.ru/) | поиск: `keyword`, `keywords[]`, `catalogues`, `place_of_work` (1 — у работодателя, 2 — на дому, 3 — разъездная), `date_published_from`, `period`, `order_field` (`date`/`payment`), `count` ≤ 100, `page` ≤ 500 результатов всего. Поля вакансии: `id`, `profession`, `work`, `candidat`, `compensation`, `payment_from`, `payment_to`, `currency`, `agreement`, `date_published` (unixtime), `town`, `place_of_work`, `type_of_work`, `experience`, `firm_name`, `link`, `is_archive`. Контакты — только с авторизацией пользователя. Лимит — 120 запросов в минуту с IP (при превышении 503, в таблице ошибок — 429) |
 | `api.superjob.ru/robots.txt` | `Disallow: /` (кроме главной и `/client`) — для индексаторов; программы ходят в API с ключом |
 | `once --dry-run --platform superjob --max-age-hours 48` с ключом (2026-10-25) | 200, поля разобрались, 37 вакансий по четырём `queries` за 48 ч, ошибок 0. Среди них 8 «Военнослужащий по контракту (служба в ВМП ДНР)»: в тексте «Программисты: C++, Python» — отсекаются `exclusions.military`. С `catalogues = [48, 650]` — 7 вакансий, но без аналитиков, DevOps и тестирования |
+| Страницы, `keyword=python` за 72 ч (2026-10-25) | `total: 59`, но на `count=100` пришло 40 и `more: false` — 19 вакансий терялись (и с ними все 8 «Военнослужащих»: порядок не строго по дате). На `count=40`: 40 + 19, `more` честный. Бот листает по 40 до `more: false`, не больше 5 страниц на слово |
 
-**Вывод для бота.** Режим **notify**, по запросу на слово из `queries` раз в 10 минут, только свежие (`date_published_from`). Откликов бот не готовит и не отправляет.
+**Вывод для бота.** Режим **notify**, по запросу на слово из `queries` раз в 10 минут, только свежие (`date_published_from`, своё окно `[sources.superjob] max_age_hours = 72`), постранично по 40. Откликов бот не готовит и не отправляет.
 
 ## 8. Открытые вопросы для пользователя
 

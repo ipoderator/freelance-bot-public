@@ -166,13 +166,14 @@ def build_sources(
         elif name == "work24":
             sources.append(
                 Work24Source(
-                    fetcher, src.operations, max_age_hours=settings.max_age_hours, known=known
-                )
+                    fetcher, src.operations, max_age_hours=settings.max_age_for(name),
+                    known=known,
+                )  # fmt: skip
             )
         elif name == "freelance_ru":
             sources.append(
                 FreelanceRuSource(
-                    fetcher, max_age_hours=settings.max_age_hours, categories=src.categories,
+                    fetcher, max_age_hours=settings.max_age_for(name), categories=src.categories,
                     known=known,
                 )  # fmt: skip
             )
@@ -180,7 +181,7 @@ def build_sources(
             sources.append(
                 SuperJobSource(
                     fetcher, settings.superjob_api_key, src.queries,
-                    max_age_hours=settings.max_age_hours, catalogues=src.catalogues,
+                    max_age_hours=settings.max_age_for(name), catalogues=src.catalogues,
                     remote_only=src.remote_only,
                 )  # fmt: skip
             )
@@ -190,7 +191,7 @@ def build_sources(
             sources.append(
                 WorkzillaSource(
                     own, settings.workzilla_cookie, settings.workzilla_agent_id,
-                    max_age_hours=settings.max_age_hours, known=known,
+                    max_age_hours=settings.max_age_for(name), known=known,
                 )  # fmt: skip
             )
         else:
@@ -258,8 +259,9 @@ def _load(args: argparse.Namespace) -> Settings:
     if getattr(args, "dry_run", False):
         settings = replace(settings, dry_run=True)
     max_age = getattr(args, "max_age_hours", None)
-    if max_age is not None:
-        settings = replace(settings, max_age_hours=max_age)
+    if max_age is not None:  # флаг — для всех площадок, и со своим сроком тоже
+        sources = {p: replace(s, max_age_hours=None) for p, s in settings.sources.items()}
+        settings = replace(settings, max_age_hours=max_age, sources=sources)
     return settings
 
 

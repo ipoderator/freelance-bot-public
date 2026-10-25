@@ -193,6 +193,17 @@ def test_project_just_inside_max_age_is_not_stale(make_project, settings):
     assert r.excluded_reason is None
 
 
+def test_platform_max_age_keeps_older_vacancies_only_there(make_project, settings):
+    superjob = replace(settings.sources["superjob"], max_age_hours=72)
+    s = replace(settings, max_age_hours=6, sources={**settings.sources, "superjob": superjob})
+    title = "Python-разработчик Telegram-ботов"
+    assert score(mk(make_project, title=title, age_h=48, platform="superjob"), s).passed
+    old = score(mk(make_project, title=title, age_h=73, platform="superjob"), s)
+    assert old.excluded_reason == "устарел"
+    fl = score(mk(make_project, title=title, age_h=7, platform="fl"), s)
+    assert fl.excluded_reason == "устарел"
+
+
 # --- монотонность и детерминированность ------------------------------------
 
 

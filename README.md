@@ -142,6 +142,21 @@ cp .env.example .env
 Если площадка сменит разметку, переобучите операции через `api-anything` и замените
 `freelance_bot/sources/freelance-ru.json` или `work-zilla.json` (ADR 0010, `docs/platforms.md`, §5–6).
 
+## SuperJob: вакансии через официальный API
+
+`[sources.superjob]` выключен, пока нет ключа. Вакансии приходят карточкой (компания, город,
+зарплата, дата публикации), как HH: откликаетесь на сайте сами, черновиков бот не пишет.
+
+1. Войдите на superjob.ru и зарегистрируйте приложение: https://api.superjob.ru/register/.
+2. Ключ (Secret key) со страницы https://api.superjob.ru/info/ впишите в `.env`:
+   `SUPERJOB_API_KEY=…`.
+3. Проверьте: `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform superjob --include-disabled --max-age-hours 48`.
+4. Поставьте `enabled = true` в `[sources.superjob]`. На сервере — деплой с `--with-env`.
+
+Что искать — `queries` (по запросу к API на слово за цикл), `catalogues` (ключи разделов из
+https://api.superjob.ru/2.0/catalogues/, например 48 — «Разработка, программирование»),
+`remote_only = true` — только удалённая работа (ADR 0012, `docs/platforms.md`, §7).
+
 ## Kwork: включён на ваш риск
 
 Пользовательское соглашение Kwork запрещает автоматический сбор данных с сервиса

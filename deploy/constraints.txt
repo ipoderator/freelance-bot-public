@@ -18,6 +18,7 @@ pyaes==1.6.1
 pyasn1==0.6.4
 pydantic==2.14.1
 pydantic_core==2.50.1
+pypdf==6.20.0
 python-dotenv==1.2.4
 python-telegram-bot==21.11.1
 rsa==4.9.1

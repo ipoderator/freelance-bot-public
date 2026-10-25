@@ -1,0 +1,196 @@
+"""SuperJob: вакансии через официальный API (api.superjob.ru, ADR 0012, docs/platforms.md, §7).
+
+`GET /2.0/vacancies/` с ключом приложения в заголовке X-Api-App-Id (SUPERJOB_API_KEY в .env;
+ключ выдаёт api.superjob.ru/register/ после входа в аккаунт SuperJob). Без авторизации
+пользователя API отдаёт вакансии в открытом доступе — этого достаточно, контакты не нужны.
+
+За цикл — по запросу на каждое слово из `queries` (свежие сверху, не старше max_age_hours,
+до 100 за запрос); лимит API — 120 запросов в минуту с IP. Вакансия — как у HH: карточка без
+черновика, отклик пользователь делает на сайте.
+"""
+
+from __future__ import annotations
+
+import html
+import json
+import re
+from collections.abc import Callable, Sequence
+from datetime import UTC, datetime, timedelta
+from typing import Any
+
+import httpx
+
+from freelance_bot.http import BlockedError, Fetcher, HttpStatusError, SourceError
+from freelance_bot.models import Platform, Project
+from freelance_bot.sources import SourceFormatError
+
+SITE = "SuperJob"
+API_URL = "https://api.superjob.ru/2.0/vacancies/"
+PAGE_SIZE = 100  # больше API не отдаёт за запрос
+CATEGORY = "Вакансия SuperJob"
+REMOTE_PLACE = 2  # place_of_work: «на дому» — удалённая работа
+KEY_HINT = (
+    "ключ приложения выдаёт https://api.superjob.ru/register/ (вход в аккаунт SuperJob), "
+    "впишите его в .env: SUPERJOB_API_KEY"
+)
+_TAG_RE = re.compile(r"<[^>]+>")
+_CURRENCIES = {"rub": "₽", "usd": "$", "eur": "€"}
+
+
+class SuperJobSource:
+    """Свежие вакансии по словам `queries`; одна вакансия из нескольких запросов — одна."""
+
+    platform: Platform = "superjob"
+
+    def __init__(
+        self,
+        fetcher: Fetcher,
+        api_key: str | None,
+        queries: Sequence[str],
+        *,
+        max_age_hours: float,
+        catalogues: Sequence[int] = (),
+        remote_only: bool = False,
+        clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+    ) -> None:
+        self._fetcher = fetcher
+        self._key = api_key
+        self._queries = list(queries)
+        self._catalogues = list(catalogues)
+        self._remote_only = remote_only
+        self._max_age = timedelta(hours=max_age_hours)
+        self._clock = clock
+
+    async def fetch(self) -> list[Project]:
+        if not self._key:
+            raise SourceError(f"{SITE}: не задан SUPERJOB_API_KEY — {KEY_HINT}")
+        since = self._clock() - self._max_age
+        found: dict[str, Project] = {}
+        for query in self._queries:
+            for row in await self._search(query, since):
+                p = parse_vacancy(row)
+                if p is not None and p.published_at >= since and not row.get("is_archive"):
+                    found.setdefault(p.external_id, p)
+        return sorted(found.values(), key=lambda p: p.published_at, reverse=True)
+
+    async def _search(self, query: str, since: datetime) -> list[dict[str, Any]]:
+        params: dict[str, Any] = {
+            "keyword": query,
+            "order_field": "date",
+            "order_direction": "desc",
+            "date_published_from": int(since.timestamp()),
+            "count": PAGE_SIZE,
+        }
+        if self._catalogues:
+            params["catalogues"] = ",".join(str(c) for c in self._catalogues)
+        if self._remote_only:
+            params["place_of_work"] = REMOTE_PLACE
+        url = str(httpx.URL(API_URL, params=params))
+        headers = {"X-Api-App-Id": self._key or "", "Accept": "application/json"}
+        try:
+            text = await self._fetcher.get_text(url, headers=headers)
+        except BlockedError:  # 403: ключ не принят (или доступ закрыт) — не «капча»
+            raise HttpStatusError(
+                f"{SITE}: HTTP 403 — ключ SUPERJOB_API_KEY не принят; {KEY_HINT}", 403
+            ) from None
+        try:
+            data = json.loads(text)
+        except ValueError:
+            raise SourceFormatError(f"{SITE}: ответ API — не JSON") from None
+        objects = data.get("objects") if isinstance(data, dict) else None
+        if not isinstance(objects, list):
+            raise SourceFormatError(f"{SITE}: в ответе API нет списка objects")
+        return [o for o in objects if isinstance(o, dict)]
+
+
+def parse_vacancy(row: dict[str, Any]) -> Project | None:
+    """Вакансия из объекта API; без id, названия, ссылки или даты — None."""
+    vacancy_id, title, url = row.get("id"), _text(row.get("profession")), row.get("link")
+    published = row.get("date_published")
+    if not (isinstance(vacancy_id, int) and title and isinstance(url, str)
+            and url.startswith("https://") and isinstance(published, int | float)):  # fmt: skip
+        return None
+    budget_min, budget_max, salary = _salary(row)
+    town = _title(row.get("town"))
+    remote = isinstance(row.get("place_of_work"), dict) and row["place_of_work"].get(
+        "id"
+    ) == REMOTE_PLACE
+    area = ", ".join(x for x in (town, "удалённо" if remote else "") if x)
+    extra = {
+        k: v
+        for k, v in {
+            "company": _text(row.get("firm_name")),
+            "area": area,
+            "salary": salary,
+            "experience": _title(row.get("experience")),
+            "schedule": _title(row.get("type_of_work")),
+        }.items()
+        if v
+    }
+    return Project(
+        platform="superjob",
+        external_id=str(vacancy_id),
+        url=url,
+        title=title,
+        description=_description(row),
+        published_at=datetime.fromtimestamp(published, UTC),
+        budget_min=budget_min,
+        budget_max=budget_max,
+        offers_count=None,
+        category=CATEGORY,
+        extra=extra,
+    )
+
+
+def _description(row: dict[str, Any]) -> str:
+    parts = [
+        f"{label}: {text}"
+        for label, key in (("Обязанности", "work"), ("Требования", "candidat"),
+                           ("Условия", "compensation"))  # fmt: skip
+        if (text := _text(row.get(key)))
+    ]
+    # «Опыт работы от 3 лет» — так требование увидит скоринг (scoring._EXP_PATTERNS)
+    terms = [
+        f"Опыт работы {_title(row.get('experience'))}" if _title(row.get("experience")) else "",
+        _title(row.get("type_of_work")),
+        _title(row.get("place_of_work")),
+    ]
+    if line := "; ".join(t for t in terms if t):
+        parts.append(line)
+    return "\n\n".join(parts)
+
+
+def _salary(row: dict[str, Any]) -> tuple[int | None, int | None, str]:
+    """(бюджет от, до — только в рублях; строка зарплаты для карточки)."""
+    lo, hi = (v if isinstance(v, int) and v > 0 else None
+              for v in (row.get("payment_from"), row.get("payment_to")))  # fmt: skip
+    currency = str(row.get("currency") or "rub").lower()
+    sign = _CURRENCIES.get(currency, currency.upper())
+    if lo is None and hi is None:
+        return None, None, "по договорённости" if row.get("agreement") else ""
+
+    def num(v: int) -> str:
+        return f"{v:,}".replace(",", " ")
+
+    if lo and hi and lo != hi:
+        text = f"{num(lo)}–{num(hi)} {sign}"
+    elif lo and hi:
+        text = f"{num(lo)} {sign}"
+    else:
+        text = f"от {num(lo)} {sign}" if lo else f"до {num(hi)} {sign}"  # type: ignore[arg-type]
+    if currency != "rub":
+        return None, None, text
+    return lo, hi, text
+
+
+def _title(value: object) -> str:
+    return _text(value.get("title")) if isinstance(value, dict) else ""
+
+
+def _text(value: object) -> str:
+    """Текст поля без HTML-тегов и лишних пробелов (в описаниях бывает разметка)."""
+    if not isinstance(value, str):
+        return ""
+    text = html.unescape(_TAG_RE.sub("\n", value))
+    lines = (" ".join(line.split()) for line in text.splitlines())
+    return "\n".join(line for line in lines if line).strip()

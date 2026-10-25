@@ -4,9 +4,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Literal, get_args
+from typing import Any, Literal, get_args
 
-Platform = Literal["fl", "kwork", "work24", "freelance_ru", "workzilla", "hh"]
+Platform = Literal["fl", "kwork", "work24", "freelance_ru", "workzilla", "hh", "superjob"]
 Mode = Literal["notify", "draft", "auto"]
 
 PLATFORMS: tuple[str, ...] = get_args(Platform)
@@ -17,7 +17,8 @@ MODES: tuple[str, ...] = get_args(Mode)
 class Project:
     platform: Platform
     external_id: str  # FL: число из URL /projects/<id>/; Kwork: wants.id; Work24: id заказа;
-    # Freelance.ru: число из /task/view/<id>; Work-zilla: id задания; HH: vacancy_key
+    # Freelance.ru: число из /task/view/<id>; Work-zilla: id задания; HH: vacancy_key;
+    # SuperJob: id вакансии
     url: str
     title: str
     description: str  # полный или обрезанный текст ТЗ
@@ -56,3 +57,14 @@ class ModeDecision:
     effective: Mode
     reasons: list[str]  # непусто, если effective != requested
     send: bool  # True только при effective == "auto" и не dry-run
+
+
+@dataclass(frozen=True)
+class User:
+    """Пользователь публичного бота (анкета — onboarding.py, ADR 0011)."""
+
+    tg_id: int
+    step: str  # шаг анкеты; "done" — пройдена
+    data: dict[str, Any]  # ФИО, обращение, профиль из резюме, направления, площадки
+    consent_at: datetime | None = None
+    completed_at: datetime | None = None

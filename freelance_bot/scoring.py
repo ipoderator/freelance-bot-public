@@ -78,6 +78,10 @@ PHP_CMS_TERMS = (
     "netcat", "webasyst",
 )  # fmt: skip
 
+# Военная служба и контракт с армией («Военнослужащий по контракту … Программисты: Python»):
+# отсекается при любом слове из exclusions.military, сильный профиль не спасает.
+MILITARY_KEY = "military"
+
 AI_CONTENT_KEY = "ai_content"
 AI_CONTENT_REASON = "вне профиля: генерация контента в готовых AI-сервисах"
 # Совпадения, которые сами по себе не говорят о разработке: «нейросеть», «промпт», «AI».
@@ -107,6 +111,7 @@ _EXCLUSION_LABELS = {
     "marketing": "маркетинг/SMM",
     "teaching": "учёба/консультации",
     "manual_qa": "ручное тестирование",
+    "military": "военная служба",
 }
 
 
@@ -330,7 +335,8 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
     else:
         best_stop, best_label = 0, ""
         for key, words in settings.exclusions.items():
-            if key in (PHP_KEY, AI_CONTENT_KEY):  # у PHP/CMS и AI-контента свои правила ниже
+            # у PHP/CMS, AI-контента и военной службы свои правила ниже
+            if key in (PHP_KEY, AI_CONTENT_KEY, MILITARY_KEY):
                 continue
             pts, _ = _points(title, description, words)
             if pts > best_stop:
@@ -351,7 +357,9 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
             else php_points >= profile_points
         )
         strong_profile = bool(ordered) and ordered[0] >= 1.0
-        if (php_in_title and not profile_in_title) or (
+        if _find_terms(full_text, settings.exclusions.get(MILITARY_KEY, [])):
+            excluded = _EXCLUSION_LABELS[MILITARY_KEY]
+        elif (php_in_title and not profile_in_title) or (
             php_points >= MIN_STOP_POINTS and php_outweighs
         ):
             # PHP/CMS-стек не перевешивается сильным профилем: основной объём — PHP.

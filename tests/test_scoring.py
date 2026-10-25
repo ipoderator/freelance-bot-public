@@ -574,6 +574,40 @@ def test_non_development_work_is_excluded(make_project, settings, title, descrip
 
 
 @pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        (
+            "Военнослужащий по контракту (служба в ВМП ДНР)",
+            "Требуются специалисты: операторы БПЛА, программисты: C++, Python.",
+        ),
+        (
+            "Python-разработчик Telegram-ботов на FastAPI",
+            "Служба по контракту с Минобороны, разработка ботов и парсеров.",
+        ),
+    ],
+    ids=["superjob-contract", "strong-profile"],
+)
+def test_military_service_is_excluded_even_with_strong_profile(
+    make_project, settings, title, description
+):
+    r = score(mk(make_project, title=title, description=description), settings)
+    assert r.passed is False
+    assert r.excluded_reason == "военная служба", r
+
+
+def test_civilian_contract_is_not_military(make_project, settings):
+    r = score(
+        mk(
+            make_project,
+            title="Telegram-бот на Python",
+            description="Работа по контракту на 3 месяца, оплата по этапам.",
+        ),
+        settings,
+    )
+    assert r.excluded_reason is None and r.passed, r
+
+
+@pytest.mark.parametrize(
     "title",
     ["Сбор базы данных компаний Германии", "Собрать каталог компаний с портала"],
 )

@@ -1,6 +1,7 @@
 """Telegram-бот (python-telegram-bot 21): команды, кнопки, расписание сбора.
 
-Все хэндлеры отвечают только владельцу (TELEGRAM_OWNER_ID); остальным — короткий отказ.
+Хэндлеры заказов отвечают только владельцу (TELEGRAM_OWNER_ID). Остальным — анкета
+публичного бота (onboarding.py), если [public] enabled, иначе короткий отказ.
 """
 
 from __future__ import annotations
@@ -17,6 +18,7 @@ from zoneinfo import ZoneInfo
 from telegram import (
     Bot,
     BotCommand,
+    BotCommandScopeChat,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     LinkPreviewOptions,
@@ -37,6 +39,8 @@ from telegram.ext import (
 from freelance_bot.config import Settings
 from freelance_bot.drafting import remaining_placeholders
 from freelance_bot.models import Project, ScoreResult
+from freelance_bot.onboarding import PREFIX as ONBOARDING_PREFIX
+from freelance_bot.onboarding import PUBLIC_HELP, Onboarding
 from freelance_bot.pipeline import Keyboard, Offer, Pipeline
 from freelance_bot.pricing import estimate
 from freelance_bot.storage import Storage
@@ -47,6 +51,7 @@ from freelance_bot.telegram_ui import (
     BUTTON_REDRAFT,
     BUTTON_SKIP,
     DIGEST_TITLE,
+    MAX_MESSAGE_LEN,
     MENU_ALL,
     MENU_NEW,
     MENU_ROWS,
@@ -72,7 +77,8 @@ from freelance_bot.telegram_ui import (
 log = logging.getLogger(__name__)
 
 COMMANDS: list[tuple[str, str]] = [
-    ("start", "Приветствие и список команд"),
+    ("start", "Анкета: заполнить или посмотреть"),
+    ("menu", "Меню: новые и все заказы, статистика, статус"),
     ("status", "Работает ли бот, последний сбор, ошибки"),
     ("pause", "Поставить сбор и уведомления на паузу"),
     ("resume", "Снять паузу"),
@@ -80,6 +86,13 @@ COMMANDS: list[tuple[str, str]] = [
     ("stats", "Статистика за сегодня и 7 дней"),
     ("last", "Подходящие заказы: выбрать и получить готовый отклик"),
     ("new", "Новые заказы, которых ещё не присылал"),
+    ("signup", "Заполнить анкету заново"),
+]
+# Меню посторонних в публичном режиме (ADR 0011)
+PUBLIC_COMMANDS: list[tuple[str, str]] = [
+    ("start", "Анкета: заполнить или посмотреть"),
+    ("profile", "Ваши данные"),
+    ("forget", "Удалить мои данные"),
 ]
 DENIED_TEXT = "Этот бот личный. Доступ закрыт."
 ERROR_TEXT = "⚠ Не получилось выполнить действие ({name}). Попробуйте ещё раз."
@@ -88,7 +101,6 @@ ALLOWED_UPDATES = ["message", "callback_query"]
 SEND_RETRIES = 2  # 429 от Telegram: ждём retry_after и повторяем, иначе карточка потеряется
 MAX_RETRY_AFTER_SEC = 60.0
 TYPING_REFRESH_SEC = 4.0  # «печатает…» Telegram показывает около 5 с
-MAX_MESSAGE_LEN = 4000
 LAST_LIMIT = 20  # в несколько сообщений, если не влезает в одно
 AWAITING_OFFER_FLAG = "awaiting_offer"  # "<platform>:<id>" — ждём от владельца цену и срок
 LAST_LIST_FLAG = "last_list"  # "<platform>:<id>,…" — заказы последнего /last по номерам
@@ -255,6 +267,8 @@ class BotHandlers:
         self.settings = settings
         self.storage = storage
         self.pipeline = pipeline
+        summarize = pipeline.summarizer.summarize_many if pipeline is not None else None
+        self.onboarding = Onboarding(settings, storage, summarize=summarize)
 
     def _is_owner(self, update: Update) -> bool:
         """Владелец и только в личке: в группе ответы (заказы, цены) увидели бы все."""
@@ -267,6 +281,21 @@ class BotHandlers:
             and (chat is None or chat.type == "private")
         )
 
+    def _is_public(self, update: Update) -> bool:
+        """Посторонний в личке при включённом публичном режиме — ему анкета."""
+        user = update.effective_user
+        chat = getattr(update, "effective_chat", None)
+        return (
+            self.settings.public_enabled
+            and user is not None
+            and (chat is None or chat.type == "private")
+            and not self._is_owner(update)
+        )
+
+    def _owner_in_signup(self, update: Update) -> bool:
+        """Владелец проходит анкету для проверки (/signup): его сообщения — в неё."""
+        return self._is_owner(update) and self.onboarding.in_progress(update.effective_user.id)
+
     async def _reply(
         self, update: Update, text: str, markup: InlineKeyboardMarkup | None = None
     ) -> None:
@@ -278,15 +307,38 @@ class BotHandlers:
         )
 
     async def _deny(self, update: Update) -> None:
+        text = PUBLIC_HELP if self._is_public(update) else DENIED_TEXT
         if update.callback_query is not None:
-            await update.callback_query.answer(DENIED_TEXT, show_alert=True)
+            await update.callback_query.answer(text, show_alert=True)
         elif update.effective_message is not None:
-            await update.effective_message.reply_text(DENIED_TEXT)
+            await update.effective_message.reply_text(text)
 
     async def start(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/start — сразу анкета, и у владельца (решение пользователя); его меню — /menu."""
+        if not (self._is_public(update) or self._is_owner(update)):
+            return await self._deny(update)
+        await self.onboarding.start(update, context)
+
+    async def menu(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return await self._deny(update)
         await self._reply(update, format_start(self._next_digest()), MENU_MARKUP)
+
+    async def signup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Анкета глазами нового пользователя; профиль владельца (profile.toml) не меняется."""
+        if not self._is_owner(update):
+            return await self._deny(update)
+        await self.onboarding.start(update, context, restart=True)
+
+    async def profile(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not (self._is_public(update) or self._is_owner(update)):
+            return await self._deny(update)
+        await self.onboarding.profile(update, context)
+
+    async def forget(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        if not (self._is_public(update) or self._is_owner(update)):
+            return await self._deny(update)
+        await self.onboarding.forget(update, context)
 
     def _next_digest(self) -> str | None:
         """Время ближайшего дайджеста для показа («12:00»); дайджест выключен — None."""
@@ -388,7 +440,10 @@ class BotHandlers:
         )
 
     async def text(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
-        """Обычное сообщение владельца: номер заказа из /last или цена и срок для выбранного."""
+        """Обычное сообщение владельца: номер заказа из /last или цена и срок для выбранного.
+        Постороннего — ответ на вопрос анкеты."""
+        if self._is_public(update):
+            return await self.onboarding.text(update, context)
         if not self._is_owner(update):
             return await self._deny(update)
         message_text = update.effective_message.text or ""
@@ -400,6 +455,8 @@ class BotHandlers:
         }.get(message_text.strip())
         if menu is not None:
             return await menu(update, context)
+        if self._owner_in_signup(update):  # меню владельца работает и посреди анкеты
+            return await self.onboarding.text(update, context)
         pick = _PICK_RE.match(message_text)
         if pick is not None:
             return await self._pick_by_number(update, int(pick.group(1)))
@@ -515,7 +572,9 @@ class BotHandlers:
         # Только тип ошибки: текст сетевых исключений может содержать адрес с токеном.
         name = type(context.error).__name__
         log.error("ошибка обработчика: %s", name)
-        if getattr(update, "effective_user", None) is None or not self._is_owner(update):
+        if getattr(update, "effective_user", None) is None or not (
+            self._is_owner(update) or self._is_public(update)
+        ):
             return
         # иначе владелец не узнает, что нажатие или команда не сработали
         if update.effective_message is not None:
@@ -523,10 +582,18 @@ class BotHandlers:
                 await update.effective_message.reply_text(ERROR_TEXT.format(name=name))
 
     async def fallback(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """Не текст: файл резюме для анкеты; владельцу вне анкеты — ничего."""
+        if self._is_public(update) or self._owner_in_signup(update):
+            return await self.onboarding.document(update, context)
         if not self._is_owner(update):
             await self._deny(update)
 
     async def button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        data = getattr(update.callback_query, "data", None) or ""
+        if data.startswith(ONBOARDING_PREFIX) and (
+            self._is_public(update) or self._is_owner(update)
+        ):
+            return await self.onboarding.button(update, context)
         if not self._is_owner(update):
             return await self._deny(update)
         query = update.callback_query
@@ -590,13 +657,14 @@ def build_application(settings: Settings, storage: Storage, pipeline: Pipeline) 
     handlers = BotHandlers(settings, storage, pipeline)
 
     async def post_init(app: Application) -> None:
-        await _register_commands(app)
+        await _register_commands(app, settings)
         await handlers.announce_menu(app.bot)
 
     app = Application.builder().token(settings.telegram_token).post_init(post_init).build()
     app.bot_data["handlers"] = handlers
     for name, callback in (
         ("start", handlers.start),
+        ("menu", handlers.menu),
         ("status", handlers.status),
         ("pause", handlers.pause),
         ("resume", handlers.resume),
@@ -604,6 +672,9 @@ def build_application(settings: Settings, storage: Storage, pipeline: Pipeline) 
         ("stats", handlers.stats),
         ("last", handlers.last),
         ("new", handlers.new),
+        ("signup", handlers.signup),
+        ("profile", handlers.profile),
+        ("forget", handlers.forget),
     ):
         app.add_handler(CommandHandler(name, callback))
     app.add_handler(CallbackQueryHandler(handlers.button))
@@ -611,6 +682,8 @@ def build_application(settings: Settings, storage: Storage, pipeline: Pipeline) 
     app.add_handler(MessageHandler(filters.ALL, handlers.fallback))
     app.add_error_handler(handlers.on_error)
 
+    # минута разбора резюме не задерживает остальные апдейты
+    handlers.onboarding.spawn = app.create_task
     if isinstance(pipeline.notifier, TelegramNotifier):
         pipeline.notifier.bind(app.bot)
 
@@ -664,9 +737,21 @@ def _make_job(pipeline: Pipeline, platform: Any, jitter_sec: int):
     return job
 
 
-async def _register_commands(app: Application) -> None:
-    """Меню команд обновляется при каждом запуске, чтобы новые команды появлялись сами."""
+async def _register_commands(app: Application, settings: Settings | None = None) -> None:
+    """Меню команд обновляется при каждом запуске, чтобы новые команды появлялись сами.
+    В публичном режиме посторонние видят команды анкеты, владелец в своём чате — все."""
+    owner_commands = [BotCommand(name, text) for name, text in COMMANDS]
+    public = settings is not None and settings.public_enabled and settings.owner_id is not None
     try:
-        await app.bot.set_my_commands([BotCommand(name, text) for name, text in COMMANDS])
+        if public:
+            await app.bot.set_my_commands([BotCommand(n, t) for n, t in PUBLIC_COMMANDS])
+            await app.bot.set_my_commands(
+                owner_commands, scope=BotCommandScopeChat(settings.owner_id)
+            )
+            return
+        await app.bot.set_my_commands(owner_commands)
+        if settings is not None and settings.owner_id is not None:
+            # меню владельца из прошлого публичного запуска иначе осталось бы старым
+            await app.bot.delete_my_commands(scope=BotCommandScopeChat(settings.owner_id))
     except Exception as exc:  # меню — удобство, запуск из-за него не падает
         log.warning("не удалось обновить меню команд: %s", type(exc).__name__)

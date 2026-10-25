@@ -16,6 +16,7 @@ from freelance_bot.bot import (
     COMMANDS,
     LAST_LIST_FLAG,
     MENU_VERSION_FLAG,
+    PUBLIC_COMMANDS,
     BotHandlers,
     TelegramNotifier,
     _make_digest_job,
@@ -428,9 +429,9 @@ async def test_new_sends_queued_projects_once(env, make_project):
     assert message.replies[0].startswith("Новых заказов пока нет")
 
 
-async def test_menu_buttons_and_start_show_persistent_keyboard(env):
+async def test_menu_buttons_and_menu_command_show_persistent_keyboard(env):
     update, message, _ = update_from(OWNER)
-    await env.handlers.start(update, None)
+    await env.handlers.menu(update, None)
     assert "👋" in message.replies[0]
     keyboard = message.markups[0].keyboard
     assert [[b.text for b in row] for row in keyboard] == [
@@ -588,7 +589,7 @@ def test_build_application_registers_commands_and_jobs(env):
     pipeline = Pipeline(env.settings, env.storage, [Src()], FakeDrafter(), notifier)
     app = build_application(env.settings, env.storage, pipeline)
     names = {c for h in app.handlers[0] for c in getattr(h, "commands", [])}
-    assert names == {name for name, _ in COMMANDS}
+    assert names == {name for name, _ in COMMANDS + PUBLIC_COMMANDS}
     assert [j.name for j in app.job_queue.jobs()] == ["collect:fl"]  # дайджест выключен
     assert notifier.bot is app.bot
 
@@ -631,7 +632,8 @@ async def test_setup_telegram_registers_commands_and_prints_user_id():
     text = "\n".join(out)
     assert code == 0
     assert [c for c, _ in bot.commands] == [
-        "start", "status", "pause", "resume", "filters", "stats", "last", "new",
+        "start", "menu", "status", "pause", "resume", "filters", "stats", "last", "new",
+        "signup",
     ]
     assert "@my_freelance_bot" in text
     assert "TELEGRAM_OWNER_ID=555" in text
@@ -705,7 +707,7 @@ def test_disabled_kwork_runs_only_with_include_disabled(capsys):
     on = {name: replace(settings.sources[name], enabled=True) for name in ("fl", "work24")}
     off = {
         name: replace(settings.sources[name], enabled=False)
-        for name in ("kwork", "freelance_ru", "workzilla", "hh")
+        for name in ("kwork", "freelance_ru", "workzilla", "hh", "superjob")
     }
     settings = replace(settings, sources={**settings.sources, **on, **off})
     assert cli.enabled_platforms(settings, None, include_disabled=False) == ["fl", "work24"]

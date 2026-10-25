@@ -16,6 +16,8 @@ logs/
 # Инструменты разработки: граф кода пересобирается `make graph`, отчёты strix — локальные
 graphify-out/
 strix_runs/
+# Личные разрешения Claude Code (локальные пути)
+.claude/settings.local.json
 # Мастер init: прежние settings.toml/profile.toml/.env и временные файлы записи
 *.bak
 *.tmp

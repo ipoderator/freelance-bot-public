@@ -24,6 +24,7 @@ from freelance_bot.sources.fl import FlSource
 from freelance_bot.sources.freelance_ru import FreelanceRuSource
 from freelance_bot.sources.hh import HhSource, TelethonReader
 from freelance_bot.sources.kwork import KworkSource
+from freelance_bot.sources.superjob import SuperJobSource
 from freelance_bot.sources.work24 import Work24Source
 from freelance_bot.sources.workzilla import WorkzillaSource, session_from_api_anything
 from freelance_bot.storage import Storage
@@ -97,7 +98,7 @@ def _setup_logging(settings: Settings | None) -> None:
         [
             settings.telegram_token, settings.anthropic_api_key, settings.openai_api_key,
             settings.groq_api_key, settings.hh_tg_api_hash, settings.hh_tg_session,
-            settings.workzilla_cookie, settings.workzilla_agent_id,
+            settings.workzilla_cookie, settings.workzilla_agent_id, settings.superjob_api_key,
             *_cookie_values(settings.workzilla_cookie),
         ]  # fmt: skip
         if settings
@@ -173,6 +174,14 @@ def build_sources(
                 FreelanceRuSource(
                     fetcher, max_age_hours=settings.max_age_hours, categories=src.categories,
                     known=known,
+                )  # fmt: skip
+            )
+        elif name == "superjob":
+            sources.append(
+                SuperJobSource(
+                    fetcher, settings.superjob_api_key, src.queries,
+                    max_age_hours=settings.max_age_hours, catalogues=src.catalogues,
+                    remote_only=src.remote_only,
                 )  # fmt: skip
             )
         elif name == "workzilla":

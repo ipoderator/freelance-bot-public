@@ -24,6 +24,7 @@ DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_INTERVALS: dict[str, int] = {
     "fl": 180, "kwork": 300, "work24": 600, "freelance_ru": 600, "workzilla": 600, "hh": 600,
+    "superjob": 600,
 }  # fmt: skip
 # Ленты Work24 — имена операций из freelance_bot/sources/work24.json
 WORK24_FEEDS = ("listItOrders", "listOrders")
@@ -31,6 +32,8 @@ WORK24_FEEDS = ("listItOrders", "listOrders")
 FREELANCE_RU_CATEGORIES = ("Веб-разработка и IT", "ИИ и Нейросети")
 # HH: чат бота hh.ru, который присылает уведомления автопоиска (freelance_bot/sources/hh.py)
 DEFAULT_HH_CHAT = "hh_rabota_bot"
+# SuperJob: слова поиска вакансий по умолчанию (sources.superjob.queries)
+SUPERJOB_QUERIES = ("python",)
 
 
 class ConfigError(Exception):
@@ -66,6 +69,11 @@ class SourceSettings:
     chat: str = ""
     # Только Freelance.ru: разделы заданий (пусто — все); остальные карточки не открываются
     categories: list[str] = field(default_factory=list)
+    # Только SuperJob: слова поиска (по запросу на слово за цикл), разделы каталога
+    # (ключи из api.superjob.ru/2.0/catalogues/), только удалённая работа
+    queries: list[str] = field(default_factory=list)
+    catalogues: list[int] = field(default_factory=list)
+    remote_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -108,6 +116,21 @@ class Settings:
     # Work-zilla: сессия аккаунта исполнителя — Cookie и заголовок agentid (workzilla-session)
     workzilla_cookie: str | None = field(default=None, repr=False)
     workzilla_agent_id: str | None = field(default=None, repr=False)
+    # SuperJob: ключ приложения API (api.superjob.ru/register/) — заголовок X-Api-App-Id
+    superjob_api_key: str | None = field(default=None, repr=False)
+    # Публичный режим (ADR 0011): /start от других людей ведёт в анкету (onboarding.py);
+    # выключен — им короткий отказ, как раньше. Владелец работает как прежде.
+    public_enabled: bool = False
+    # Площадки, которые анкета предлагает новым пользователям (кнопка «Везде» — все они)
+    public_platforms: tuple[Platform, ...] = ()
+
+    @property
+    def signup_platforms(self) -> tuple[Platform, ...]:
+        """Площадки анкеты, с которых бот сейчас собирает: выключенную (HH без сессии,
+        SuperJob без ключа) не предлагать и не показывать."""
+        return tuple(
+            p for p in self.public_platforms if p in self.sources and self.sources[p].enabled
+        )
 
     @property
     def has_llm_key(self) -> bool:
@@ -125,6 +148,7 @@ def load_settings(path: Path = Path("settings.toml"), env_file: Path = Path(".en
     offer = _table(raw, "offer")
     kwork = _table(raw, "kwork")
     digest = _table(raw, "digest")
+    public = _table(raw, "public")
 
     directions = _active_directions(
         _parse_directions(_table(raw, "directions")), general.get("directions", [])
@@ -143,6 +167,7 @@ def load_settings(path: Path = Path("settings.toml"), env_file: Path = Path(".en
         hh_tg_session=env.get("HH_TG_SESSION"),
         workzilla_cookie=env.get("WORKZILLA_COOKIE"),
         workzilla_agent_id=env.get("WORKZILLA_AGENT_ID"),
+        superjob_api_key=env.get("SUPERJOB_API_KEY"),
         db_path=Path(_str(storage, "db_path", "storage.db_path", "data/bot.sqlite3")),
         timezone=_str(general, "timezone", "general.timezone", "Europe/Moscow"),
         max_age_hours=_number(general, "max_age_hours", "general.max_age_hours", 6),
@@ -169,7 +194,19 @@ def load_settings(path: Path = Path("settings.toml"), env_file: Path = Path(".en
             _int(digest, "interval_min", "digest.interval_min", 60, max_value=24 * 60),
             MIN_DIGEST_INTERVAL_MIN,
         ),
+        public_enabled=_bool(public, "enabled", "public.enabled", False),
+        public_platforms=_parse_public_platforms(public),
     )
+
+
+def _parse_public_platforms(public: dict[str, Any]) -> tuple[Platform, ...]:
+    platforms = _str_list(public, "platforms", "public.platforms")
+    unknown = [p for p in platforms if p not in PLATFORMS]
+    if unknown:
+        raise ConfigError(
+            f"public.platforms: неизвестные площадки {unknown}; можно: {', '.join(PLATFORMS)}"
+        )
+    return tuple(dict.fromkeys(platforms))  # type: ignore[arg-type]
 
 
 # ── чтение файлов ────────────────────────────────────────────────────────────
@@ -192,7 +229,7 @@ def _read_env(env_file: Path) -> dict[str, str | None]:
         "TELEGRAM_BOT_TOKEN", "TELEGRAM_OWNER_ID", "ANTHROPIC_API_KEY", "LLM_MODEL",
         "OPENAI_API_KEY", "OPENAI_MODEL", "GROQ_API_KEY", "GROQ_MODEL",
         "HH_TG_API_ID", "HH_TG_API_HASH", "HH_TG_SESSION", "WORKZILLA_COOKIE",
-        "WORKZILLA_AGENT_ID",
+        "WORKZILLA_AGENT_ID", "SUPERJOB_API_KEY",
     )  # fmt: skip
     result: dict[str, str | None] = {}
     for name in names:
@@ -244,6 +281,7 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
                 enabled=False, interval_sec=DEFAULT_INTERVALS[platform], urls=[],
                 chat=DEFAULT_HH_CHAT if platform == "hh" else "",
                 categories=list(FREELANCE_RU_CATEGORIES) if platform == "freelance_ru" else [],
+                queries=list(SUPERJOB_QUERIES) if platform == "superjob" else [],
             )  # fmt: skip
             continue
         table = _table(raw, platform, prefix)
@@ -268,6 +306,7 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
         operations = _parse_operations(table, platform, prefix)
         chat = _parse_chat(table, platform, prefix)
         categories = _parse_categories(table, platform, prefix)
+        queries, catalogues, remote_only = _parse_superjob(table, platform, prefix)
         sources[platform] = SourceSettings(
             enabled=_bool(table, "enabled", f"{prefix}.enabled", True),
             interval_sec=max(interval, MIN_INTERVAL_SEC),
@@ -279,8 +318,39 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
             operations=operations,
             chat=chat,
             categories=categories,
+            queries=queries,
+            catalogues=catalogues,
+            remote_only=remote_only,
         )
     return sources
+
+
+def _parse_superjob(
+    table: dict[str, Any], platform: str, prefix: str
+) -> tuple[list[str], list[int], bool]:
+    keys = ("queries", "catalogues", "remote_only")
+    if platform != "superjob":
+        for key in keys:
+            if key in table:
+                raise ConfigError(
+                    f"{prefix}.{key}: настройка действует только для sources.superjob"
+                )
+        return [], [], False
+    queries = table.get("queries", list(SUPERJOB_QUERIES))
+    if (
+        not isinstance(queries, list)
+        or not queries
+        or not all(isinstance(q, str) and q.strip() for q in queries)
+    ):
+        raise ConfigError(f"{prefix}.queries: нужен непустой список слов поиска")
+    catalogues = table.get("catalogues", [])
+    if not isinstance(catalogues, list) or not all(
+        isinstance(c, int) and not isinstance(c, bool) and c > 0 for c in catalogues
+    ):
+        raise ConfigError(f"{prefix}.catalogues: нужен список ключей разделов (целые числа)")
+    remote_only = _bool(table, "remote_only", f"{prefix}.remote_only", False)
+    unique_queries = list(dict.fromkeys(q.strip() for q in queries))
+    return unique_queries, list(dict.fromkeys(catalogues)), remote_only
 
 
 def _parse_operations(table: dict[str, Any], platform: str, prefix: str) -> list[str]:

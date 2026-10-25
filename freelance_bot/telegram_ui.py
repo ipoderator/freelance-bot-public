@@ -17,7 +17,7 @@ from freelance_bot.scoring import DIRECTION_LABELS
 
 PLATFORM_NAMES: dict[str, str] = {
     "fl": "FL.ru", "kwork": "Kwork", "work24": "Work24", "freelance_ru": "Freelance.ru",
-    "workzilla": "Work-zilla", "hh": "HH.ru",
+    "workzilla": "Work-zilla", "hh": "HH.ru", "superjob": "SuperJob",
 }  # fmt: skip
 KWORK_TERMS_URL = "https://kwork.ru/terms_of_service"
 KWORK_WARNING = (
@@ -66,7 +66,8 @@ PLATFORM_TIPS: dict[str, tuple[str, ...]] = {
     ),
 }
 # Вакансии HH: отклик пользователь делает на hh.ru сам — без черновика, цены и срока
-VACANCY_PLATFORMS = frozenset({"hh"})
+VACANCY_PLATFORMS = frozenset({"hh", "superjob"})
+MAX_MESSAGE_LEN = 4000  # Telegram режет на 4096; запас на HTML-разметку
 VACANCY_NOTE = "Отклик на вакансию — на hh.ru, по ссылке: бот вакансиям отклики не готовит."
 ESTIMATE_MARK = "🧮"
 REASON_MARK = "🎯"
@@ -198,7 +199,9 @@ def format_vacancy_card(p: Project, r: ScoreResult | None, tz: str, summary: str
     lines = [f"💼 <b>{esc(p.title)}</b>", _employer(p)]
     if summary:
         lines.append(f"{SUMMARY_MARK} {esc(summary)}")
-    lines.append(f"🌐 {site} · 🕐 уведомление от {esc(fmt_time(p.published_at, tz))}")
+    # у HH даты публикации нет — только время уведомления Хэдди
+    when = "уведомление от" if p.platform == "hh" else "опубликована"
+    lines.append(f"🌐 {site} · 🕐 {when} {esc(fmt_time(p.published_at, tz))}")
     lines.append(f"💵 зарплата: {esc(_salary(p))}")
     if r is not None:
         lines.append(f"⭐ Score: <b>{r.score}</b>/100")
@@ -252,6 +255,7 @@ def format_offer_list(
     now: datetime | None = None,
     title: str = LIST_TITLE,
     reasons: Sequence[str] | None = None,
+    hint: str = PICK_HINT,
 ) -> str:
     """Список заказов с номерами от `start`; заголовок — только у первой части.
     `reasons` — почему отобран каждый заказ (selection_reason)."""
@@ -260,7 +264,7 @@ def format_offer_list(
             "За последнюю неделю подходящих заказов, на которые вы ещё не откликнулись, нет. "
             "Новые пришлю сам, как только появятся."
         )
-    lines = [title, PICK_HINT, ""] if start == 1 else []
+    lines = [title, hint, ""] if start == 1 else []
     for index, (p, score) in enumerate(items):
         number = start + index
         url = html.escape(p.url, quote=True)

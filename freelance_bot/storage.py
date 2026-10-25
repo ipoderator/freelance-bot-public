@@ -14,7 +14,7 @@ from datetime import UTC, datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from freelance_bot.models import Mode, Project, ScoreResult
+from freelance_bot.models import Mode, Project, ScoreResult, User
 
 STATUSES: tuple[str, ...] = (
     "new",
@@ -88,6 +88,19 @@ MIGRATIONS: tuple[str, ...] = (
         note            TEXT
     );
     CREATE INDEX events_ts_kind ON events (ts, kind);
+    """,
+    # Публичный бот (ADR 0011): анкета пользователя. Файл резюме не хранится — только
+    # выжимка в data; /forget удаляет строку целиком.
+    """
+    CREATE TABLE users (
+        tg_id           INTEGER PRIMARY KEY,
+        step            TEXT NOT NULL,
+        data            TEXT NOT NULL DEFAULT '{}',
+        consent_at      TEXT,
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        completed_at    TEXT
+    );
     """,
 )
 
@@ -362,6 +375,70 @@ class Storage:
                 """,
                 (key, value, self._now()),
             )
+
+    # ── пользователи публичного бота ─────────────────────────────────────────
+
+    def get_user(self, tg_id: int) -> User | None:
+        row = self._conn.execute("SELECT * FROM users WHERE tg_id = ?", (tg_id,)).fetchone()
+        return None if row is None else self._user(row)
+
+    def users(self, completed: bool = True) -> list[User]:
+        """Пользователи; completed — только прошедшие анкету."""
+        where = "WHERE completed_at IS NOT NULL" if completed else ""
+        rows = self._conn.execute(f"SELECT * FROM users {where} ORDER BY tg_id").fetchall()
+        return [self._user(row) for row in rows]
+
+    def save_user(
+        self,
+        tg_id: int,
+        step: str,
+        data: dict,
+        *,
+        consent: bool = False,
+        completed: bool | None = None,
+    ) -> User:
+        """Создаёт или обновляет анкету. consent ставит время согласия один раз;
+        completed: True — анкета пройдена сейчас, False — снова заполняется (рассылка по
+        ней не идёт), None — не менять."""
+        now = self._now()
+        with self._conn:
+            self._conn.execute(
+                """
+                INSERT INTO users (tg_id, step, data, consent_at, created_at, updated_at,
+                    completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT (tg_id) DO UPDATE SET step = excluded.step, data = excluded.data,
+                    consent_at = COALESCE(users.consent_at, excluded.consent_at),
+                    updated_at = excluded.updated_at,
+                    completed_at = CASE WHEN ? THEN excluded.completed_at
+                        ELSE users.completed_at END
+                """,
+                (
+                    tg_id, step, json.dumps(data, ensure_ascii=False),
+                    now if consent else None, now, now, now if completed else None,
+                    completed is not None,
+                ),  # fmt: skip
+            )
+        user = self.get_user(tg_id)
+        assert user is not None
+        return user
+
+    def delete_user(self, tg_id: int) -> bool:
+        with self._conn:
+            return self._conn.execute("DELETE FROM users WHERE tg_id = ?", (tg_id,)).rowcount > 0
+
+    @staticmethod
+    def _user(row: sqlite3.Row) -> User:
+        def when(value: str | None) -> datetime | None:
+            return datetime.fromisoformat(value) if value else None
+
+        return User(
+            tg_id=int(row["tg_id"]),
+            step=row["step"],
+            data=json.loads(row["data"]),
+            consent_at=when(row["consent_at"]),
+            completed_at=when(row["completed_at"]),
+        )
 
     # ── статистика ───────────────────────────────────────────────────────────
 

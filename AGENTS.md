@@ -20,6 +20,7 @@ Telegram-бот для фрилансера: находит свежие зак�
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform freelance_ru --max-age-hours 48` | разовый прогон Freelance.ru: первая страница /task + карточки новых заданий IT-разделов |
 | `.venv/bin/python -m freelance_bot workzilla-session --from <API_ANYTHING_HOME>/sessions/work-zilla.json` | сессия Work-zilla из api-anything → `WORKZILLA_COOKIE`, `WORKZILLA_AGENT_ID` в `.env` (600); значения не печатает |
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform workzilla --include-disabled` | разовый прогон Work-zilla: пока лента демонстрационная — ошибка «лента демонстрационная», ничего не сохраняется |
+| `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform superjob --include-disabled --max-age-hours 48` | разовый прогон SuperJob (официальный API, нужен `SUPERJOB_API_KEY`) |
 | `.venv/bin/pip install -e '.[login]' && .venv/bin/python -m freelance_bot hh-login` | разовый вход в свой Telegram для вакансий HH: QR-код (`--code` — по коду), сессия → `.env` (600); интерактивно, запускает пользователь |
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform hh --include-disabled --max-age-hours 48` | разовый прогон HH: читает чат с @hh_rabota_bot его сессией (только на машине, где бот не запущен) |
 | `.venv/bin/python -m freelance_bot setup-telegram` | getMe, setMyCommands, подсказка про TELEGRAM_OWNER_ID; без токена — шаги, код 1 |
@@ -35,10 +36,11 @@ Telegram-бот для фрилансера: находит свежие зак�
 - `settings.toml` — источники, URL лент, направления и ключевые слова, исключения, min_score; правится без кода.
 - `freelance_bot/scoring.py` — балл и отсечение; веса и общие слова `WEAK_TERMS` — константы в файле.
 - `freelance_bot/pricing.py` — ориентировочная цена и срок (вилки `TIERS`); подставляется вместо [ЦЕНА]/[СРОК] при показе.
-- `freelance_bot/sources/` — парсеры FL (RSS) и Kwork (HTML); Work24, Freelance.ru, Work-zilla — `work24.py`, `freelance_ru.py`, `workzilla.py` исполняют операции API Anything из `work24.json`, `freelance-ru.json`, `work-zilla.json` через общий `api_anything.py` (без Node.js); HH — `hh.py` читает сессией Telegram пользователя подборки бота @hh_rabota_bot (ADR 0009); `freelance_bot/http.py` — ретраи и детектор блокировок.
+- `freelance_bot/sources/` — парсеры FL (RSS) и Kwork (HTML); Work24, Freelance.ru, Work-zilla — `work24.py`, `freelance_ru.py`, `workzilla.py` исполняют операции API Anything из `work24.json`, `freelance-ru.json`, `work-zilla.json` через общий `api_anything.py` (без Node.js); HH — `hh.py` читает сессией Telegram пользователя подборки бота @hh_rabota_bot (ADR 0009); SuperJob — `superjob.py`, официальный API с ключом приложения (ADR 0012); `freelance_bot/http.py` — ретраи и детектор блокировок.
 - `freelance_bot/drafting.py` (1100+ строк) + `profile/profile.toml` — черновики и валидатор; факты об опыте только из профиля.
 - `freelance_bot/summary.py` — суть заказа (📝) для карточки и `/last`.
 - `freelance_bot/policy.py` — `decide_mode`, `SENDERS`; `freelance_bot/storage.py` — SQLite и флаги.
+- `freelance_bot/onboarding.py` — анкета публичного бота (ADR 0011): согласие → ФИО → обращение → резюме → направления → площадки, таблица `users`, частота уведомлений — `freelance_bot/schedule.py` (раз в час 9–21 по умолчанию или свой тайминг); `freelance_bot/resume.py` — текст из PDF/DOCX/TXT и ссылок Google/Яндекс Диска, разбор нейросетью с проверкой по тексту резюме или встроенный. Рассылка по анкетам — этап 2, ещё не сделан.
 - `tests/fixtures/` — снятые ответы площадок; `data/` — SQLite (не в git).
 
 ## Инструменты разработки (для Claude Code, не для бота)
@@ -55,6 +57,23 @@ Telegram-бот для фрилансера: находит свежие зак�
 
 CLI ставятся через uv: `uv tool install graphifyy`, `uv tool install strix-agent`.
 
+## Навыки Claude Code (`.claude/skills/`)
+
+Claude применяет их сам по описанию; вызвать явно — `/<имя>`.
+
+| Навык | Когда |
+|---|---|
+| `lictor-security-check` | перед деплоем, публикацией, включением `[public]`; «проверь безопасность», «нет ли утечек» — секреты, сессии бирж и HH, ключи нейросетей, логи, текст заказов в промптах и HTML, запрет записи на биржи. Только чтение |
+| `known-issue` | площадка перестала отдавать заказы, сессия или ключ отозваны, лента сменила формат, ограничение robots.txt/условий — куда записать и как закрыть |
+| `adr` | выбор или пересмотр способа работы: новый источник, отказ от площадки, данные, нейросеть, публичный режим → `docs/adr/` |
+| `api-anything` | снять, переобучить, проверить операции чтения для бирж (`freelance_bot/sources/*.json`): только GET tier 1, без записей |
+| `db-migration` | новая таблица, столбец, индекс в SQLite (`storage.MIGRATIONS`) |
+| `close-task` | конец правки: `make check`, `graphify update .`, документация, записи о правке |
+| `commit-push` | «коммит и пуш» — только по просьбе пользователя |
+
+Не заведены: `ci-triage` — CI нет; `security-review` — есть встроенный `/security-review`,
+`lictor-security-check` и навыки strix.
+
 ## Подводные камни
 
 - Ключевые слова сопоставлять только через `textmatch.find_terms`: начало на границе слова, термин <= 3 символов — целым словом («ios» не найдётся в «axios»).
@@ -69,6 +88,9 @@ CLI ставятся через uv: `uv tool install graphifyy`, `uv tool instal
 - Правила правды в откликах зависят от профиля: `experience_years` (стаж больше — ложь; «5 лет» запрещено при стаже < 5), `built_bots_or_agents` (нет — «делал ботов» запрещено); отбор — `[scoring] experience_years`.
 - Тесты берут профиль из `profile/profile.example.toml` (вымышленный «Иван»), а не из своего `profile.toml`; оба проверяет `tests/test_profile.py`.
 - Бот отвечает владельцу только в личном чате (`_is_owner`); в группе — отказ.
+- Публичный режим `[public] enabled` (ADR 0011): посторонним в личке — анкета (`_is_public`), команды владельца им закрыты. На сервере выключен до этапа 2 (рассылка). У владельца `/start` тоже сразу открывает анкету (заново — `/signup`), его меню — `/menu`; `profile.toml` анкета не трогает. Kwork в анкете не предлагать («давай пока без kwork»).
+- Стаж из резюме — по периодам мест работы в IT (`resume.profession_years`), а не по общей строке hh «Опыт работы — N лет»: она считает и работу не по профессии. Найдены периоды — они важнее ответа нейросети; поправить вручную — кнопка «✏️ Стаж» в анкете.
+- Ссылки на резюме — только Google Docs/Диск и Яндекс Диск (`resume.ALLOWED_HOST_SUFFIXES`): адрес присылает посторонний, а запрос идёт с сервера (SSRF). Резюме hh.ru по ссылке не скачивать. Файл резюме не хранить — только выжимку; в тестах — вымышленные ФИО (проверка утечек ловит настоящие).
 - `SENDERS` пуст, поэтому `auto` всегда деградирует в `draft` (ADR 0001); не добавлять отправку на биржи.
 - Токен вырезается из логов `RedactingFormatter` (`freelance_bot/__main__.py`); не печатать секреты.
 - «Сегодня» для лимитов считается по МСК, время в БД — UTC.
@@ -93,5 +115,6 @@ CLI ставятся через uv: `uv tool install graphifyy`, `uv tool instal
 - `GROQ_API_KEY` — необязателен; задан — черновики и суть пишет Groq (тот же адаптер `openai_llm.py`, `groq()`), он важнее ключей OpenAI и Anthropic.
 - `HH_TG_API_ID`, `HH_TG_API_HASH`, `HH_TG_SESSION` — вакансии HH: приложение с my.telegram.org и сессия пользователя Telegram; пишет `hh-login`. Сессия = полный доступ к аккаунту.
 - `WORKZILLA_COOKIE`, `WORKZILLA_AGENT_ID` — сессия аккаунта исполнителя Work-zilla (cookie `Bearer` и заголовок `agentid`); пишет `workzilla-session`. Cookie = вход в аккаунт.
+- `SUPERJOB_API_KEY` — ключ приложения API SuperJob (api.superjob.ru/register/, заголовок `X-Api-App-Id`); без него `[sources.superjob]` выключен.
 - `GROQ_MODEL` — модель Groq (по умолчанию `openai/gpt-oss-120b`). Бесплатный тариф: 8K токенов в минуту, `max_completion_tokens` входит в счёт — потолок `GROQ_MAX_TOKENS`.
 

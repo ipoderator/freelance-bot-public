@@ -25,9 +25,9 @@ from freelance_bot.models import Project
 
 log = logging.getLogger(__name__)
 
-# Вакансии HH: описание и так короткое («Обязанности: …») — нейросеть не зовём, лимит Groq
-# остаётся заказам
-BUILTIN_ONLY = frozenset({"hh"})
+# Вакансии HH и SuperJob: описание начинается с «Обязанности: …» — нейросеть не зовём, лимит
+# Groq остаётся заказам
+BUILTIN_ONLY = frozenset({"hh", "superjob"})
 SUMMARY_MAX_CHARS = 200  # /last: 10 заказов с сутью должны влезть в одно сообщение (4096)
 LLM_SUMMARY_MAX_TOKENS = 4000  # с запасом на adaptive thinking (на 5.5 его не выключить)
 

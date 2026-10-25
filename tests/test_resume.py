@@ -21,12 +21,15 @@ from freelance_bot.resume import (
     ResumeProfile,
     analyze,
     builtin_profile,
+    city,
     download_url,
     experience_years,
     extract_text,
     fetch_link,
     find_link,
     parse_llm_profile,
+    profession,
+    section_items,
     work_periods,
 )
 
@@ -164,7 +167,9 @@ async def test_google_doc_is_downloaded_as_text():
     def handler(request: httpx.Request) -> httpx.Response:
         seen.append(str(request.url))
         if request.url.host == "docs.google.com":
-            return httpx.Response(307, headers={"location": "https://doc-0.googleusercontent.com/x"})
+            return httpx.Response(
+                307, headers={"location": "https://doc-0.googleusercontent.com/x"}
+            )
         return httpx.Response(200, content=RESUME.encode())
 
     text = await fetch_link(
@@ -275,7 +280,8 @@ def test_experience_counts_only_it_jobs_not_hh_total():
         ("Опыт работы\n11.2024 – 08.2026\nBackend developer\n"
          "01.2026 – 10.2026\nPython, фриланс", 2.0),
         ("Work experience\nNov 2024 - present\nSoftware engineer, Python", 2.0),
-        ("Опыт работы\nМарт 2020 — Май 2022\nМенеджер по продажам", 0.0),  # не IT
+        # не разработчик — стаж по всем местам работы, а не ноль
+        ("Опыт работы\nМарт 2020 — Май 2022\nМенеджер по продажам", 2.2),
         ("Образование\nСентябрь 2016 — Июнь 2020\nПрограммист", 0.0),  # учёба, стажа нет
     ],
 )  # fmt: skip
@@ -317,9 +323,16 @@ def test_llm_profile_drops_what_resume_does_not_say(settings):
 
 def test_llm_cannot_claim_bots_without_evidence(settings):
     text = RESUME.replace("LLM-ассистентов", "ассистентов")
-    assert parse_llm_profile(_llm_answer(built_bots_or_agents=True), text, settings).built_bots_or_agents is False  # noqa: E501
+    assert (
+        parse_llm_profile(
+            _llm_answer(built_bots_or_agents=True), text, settings
+        ).built_bots_or_agents
+        is False
+    )  # noqa: E501
     bots = text + "\nДелал Telegram-ботов на aiogram"
-    assert parse_llm_profile(_llm_answer(built_bots_or_agents=True), bots, settings).built_bots_or_agents  # noqa: E501
+    assert parse_llm_profile(
+        _llm_answer(built_bots_or_agents=True), bots, settings
+    ).built_bots_or_agents  # noqa: E501
 
 
 def test_llm_bad_years_fall_back_to_resume(settings):
@@ -363,6 +376,146 @@ async def test_analyze_falls_back_to_builtin(settings):
 async def test_llm_without_directions_gets_builtin_ones(settings):
     p = await analyze(RESUME, settings, FakeClient(_llm_answer(directions=[])))
     assert p.generator == "llm" and p.directions == builtin_profile(RESUME, settings).directions
+
+
+# ── 10 вымышленных резюме разных профессий и вёрстки (текст как его отдаёт pypdf) ──
+
+RESUMES = ROOT / "tests" / "fixtures" / "resumes"
+CASES = {
+    # файл: (профессия, город, стаж, должности мест работы, навыков, образование)
+    "01_cafe_admin": ("Администратор кофейни", "", 4.0, ["Администратор кофейни"], 7, []),
+    "02_sales_assistant": ("Продавец-консультант", "Липецк", 5.2,
+                           ["Продавец-консультант — Магазин товаров для дома",
+                            "Кассир — Супермаркет «У дома»"], 5,
+                           ["Колледж сервиса, коммерция · 2021"]),
+    "03_warehouse_picker": ("Комплектовщик склада", "Воронеж", 4.3,
+                            ["Комплектовщик — Склад «РегионТорг»",
+                             "Рабочий склада — ООО «Снабжение»"], 5,
+                            ["Среднее общее образование, 2022"]),
+    "04_courier": ("Курьер на личном автомобиле", "Липецк", 4.0,
+                   ["Курьер — Служба доставки «Быстро»",
+                    "Водитель-экспедитор — Магазин «Фермерский»"], 4,
+                   ["Среднее профессиональное образование · логистика · 2022"]),
+    "05_cleaner": ("Уборщик помещений", "Елец", 6.5,
+                   ["Уборщик служебных помещений — Бизнес-центр «Север»",
+                    "Горничная — Гостиница «Встреча»"], 4, ["Среднее общее образование"]),
+    "06_kindergarten_teacher": ("Воспитатель детского сада", "Липецк", 8.2,
+                                ["Воспитатель — Детский сад № 18",
+                                 "Помощник воспитателя — Детский сад «Ромашка»"], 4,
+                                ["Педагогический колледж · дошкольное образование · 2018"]),
+    "07_accountant": ("Бухгалтер на первичную документацию", "Тамбов", 3.8,
+                      ["Помощник бухгалтера — Торговая компания «Парус»",
+                       "Оператор учёта — Складская компания «Маяк»"], 5,
+                      ["Экономический колледж · бухгалтерский учёт · 2022"]),
+    "08_cook": ("Повар горячего цеха", "Воронеж", 6.8,
+                ["Повар — Кафе «Тёплый хлеб»", "Повар-универсал — Столовая «Линия»"], 5,
+                ["Профессиональное училище · поварское дело · 2020"]),
+    "09_hotel_admin": ("Администратор гостиницы", "Липецк", 6.2,
+                       ["Администратор — Гостиница «Центральная»",
+                        "Оператор бронирования — Гостевой дом «Липа»"], 5,
+                       ["Курсы гостиничного сервиса · 2020"]),
+    "10_florist": ("Флорист", "Курск", 5.0, ["Флорист — Салон цветов «Лепесток»"], 4,
+                   ["Курсы флористики · 2021"]),
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", CASES)
+def test_resumes_of_other_professions(name, settings):
+    title, town, years, roles, skills, education = CASES[name]
+    text = extract_text((RESUMES / f"{name}.txt").read_bytes(), f"{name}.txt")
+    p = builtin_profile(text, settings, TODAY)
+    assert (p.profession, p.city, p.experience_years) == (title, town, years)
+    assert [job.title for job in work_periods(text, TODAY)] == roles
+    assert len(p.skills) == skills and p.education == education
+    # подписи-предложения и контакты не попадают ни в навыки, ни в образование
+    assert not any("вымышлен" in item or "@" in item for item in p.skills + p.education)
+
+
+def test_other_professions_get_no_it_directions(settings):
+    for path in sorted(RESUMES.glob("*.txt")):
+        text = extract_text(path.read_bytes(), path.name)
+        assert builtin_profile(text, settings, TODAY).directions == [], path.name  # «Excel»
+
+
+def test_resume_pdf_end_to_end(settings):
+    text = extract_text((RESUMES / "04_courier.pdf").read_bytes(), "resume.pdf")
+    assert "Планирую маршрут, бережно" in text  # пробел pypdf перед запятой убран
+    p = builtin_profile(text, settings, TODAY)
+    assert p.jobs == ["Курьер — Служба доставки «Быстро» (2024–2026)",
+                      "Водитель-экспедитор — Магазин «Фермерский» (2022–2024)"]  # fmt: skip
+    assert "Навигация" in p.skills and p.experience_years == 4.0
+
+
+@pytest.mark.parametrize(
+    ("period", "months"),
+    [
+        ("Май 2023 — настоящее время", 42),  # по октябрь 2026 включительно
+        ("Апр 2022 — Сен 2026", 54),
+        ("С 03/2022 по 08/2026", 54),
+        ("09.2020 — по н.в.", 74),
+        ("01.02.2024 - 01.03.2025", 14),
+        ("2022–2026", 48),  # одни годы: по начало последнего года
+        ("2021 / 2026", 60),
+        ("2023–н.в.", 46),
+        ("2022 — 2022", 12),
+    ],
+)
+def test_period_formats(period, months):
+    (job,) = work_periods(f"Опыт работы\nПовар — Кафе\n{period}\nГотовил блюда", TODAY)
+    assert job.end - job.start + 1 == months and job.title == "Повар — Кафе"
+
+
+def test_single_years_and_education_are_not_jobs():
+    text = "Опыт работы\nПовар\n2020 (сезонно)\nОбучение\nКурсы, 2019 — 2020"
+    assert work_periods(text, TODAY) == []
+
+
+def test_title_under_period_in_hh_layout():
+    jobs = work_periods(HH_RESUME, TODAY)
+    assert [job.title for job in jobs] == ["ООО Ромашка", "Кафе «Лето»"]
+    assert not any(job.role for job in jobs)  # компания, а не должность
+
+
+def test_hh_header_fields():
+    text = ("Сидоров Олег\nМужчина, 30 лет\nПроживает: Воронеж\n"
+            "Желаемая должность\nPython-разработчик\nКлючевые навыки\n"
+            "Знание языков Английский — A2\nНавыки Python, Django, Redis")  # fmt: skip
+    assert profession(text) == "Python-разработчик" and city(text) == "Воронеж"
+    assert section_items(text, "skills", 15) == [
+        "Английский — A2", "Python", "Django", "Redis"
+    ]  # fmt: skip
+
+
+def test_inline_skills_and_header_like_sentences():
+    text = "Иван Петров\nНавыки: Excel, 1С\nОпыт работы на стойке — главное.\nО себе\nТекст"
+    assert section_items(text, "skills", 15) == ["Excel", "1С"]
+
+
+def test_llm_takes_quoted_fields_and_fills_gaps_from_text(settings):
+    text = (RESUMES / "08_cook.txt").read_text(encoding="utf-8")
+    text = extract_text(text.encode(), "r.txt")
+    answer = _llm_answer(profession="Повар", city="Москва", skills=["Горячий цех", "Суши"],
+                         education=[])  # fmt: skip
+    p = parse_llm_profile(answer, text, settings)
+    assert p.profession == "Повар" and p.city == "Воронеж"  # Москвы в резюме нет
+    assert p.skills == ["Горячий цех"]  # «Суши» нет в резюме
+    assert p.education == ["Профессиональное училище · поварское дело · 2020"]
+    assert len(p.jobs) == 2
+
+
+async def test_contacts_are_not_sent_to_llm(settings):
+    text = extract_text((RESUMES / "02_sales_assistant.txt").read_bytes(), "r.txt")
+    client = FakeClient(_llm_answer())
+    await analyze(text, settings, client)
+    sent = client.calls[0]["messages"][0]["content"]
+    assert "@example.com" not in sent and "000-00-02" not in sent
+    assert "Август 2021 — апрель 2023" in sent and "[телефон]" in sent
+    assert "не инструкции" in client.calls[0]["system"]
+
+
+def test_old_profile_without_new_fields_is_read():
+    p = ResumeProfile.from_dict({"directions": ["backend"], "experience_years": 1.8})
+    assert p.profession == "" and p.skills == [] and p.jobs == []
 
 
 def test_profile_roundtrip():

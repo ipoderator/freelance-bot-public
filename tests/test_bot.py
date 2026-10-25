@@ -714,7 +714,7 @@ def test_disabled_kwork_runs_only_with_include_disabled(capsys):
     on = {name: replace(settings.sources[name], enabled=True) for name in ("fl", "work24")}
     off = {
         name: replace(settings.sources[name], enabled=False)
-        for name in ("kwork", "freelance_ru", "workzilla", "hh", "superjob")
+        for name in ("kwork", "freelance_ru", "workzilla", "hh", "superjob", "trudvsem")
     }
     settings = replace(settings, sources={**settings.sources, **on, **off})
     assert cli.enabled_platforms(settings, None, include_disabled=False) == ["fl", "work24"]
@@ -862,8 +862,8 @@ async def test_nofit_asks_reason_learns_and_explains(env, make_project):
     ]
     reasons = [b.callback_data for row in message.markups[0].inline_keyboard for b in row]
     assert reasons == [
-        "nf-topic:superjob:s1", "nf-pay:superjob:s1", "nf-office:superjob:s1",
-        "nf-company:superjob:s1", "nf-level:superjob:s1",
+        "nf-topic:superjob:s1", "nf-skills:superjob:s1", "nf-pay:superjob:s1",
+        "nf-office:superjob:s1", "nf-company:superjob:s1", "nf-level:superjob:s1",
     ]  # fmt: skip
 
     update, message, query = update_from(OWNER, "nf-level:superjob:s1")

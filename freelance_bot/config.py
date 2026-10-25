@@ -24,7 +24,7 @@ DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_INTERVALS: dict[str, int] = {
     "fl": 180, "kwork": 300, "work24": 600, "freelance_ru": 600, "workzilla": 600, "hh": 600,
-    "superjob": 600,
+    "superjob": 600, "trudvsem": 600,
 }  # fmt: skip
 # Ленты Work24 — имена операций из freelance_bot/sources/work24.json
 WORK24_FEEDS = ("listItOrders", "listOrders")

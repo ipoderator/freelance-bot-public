@@ -7,6 +7,7 @@
 За цикл — по запросу на каждое слово из `queries` (свежие сверху, не старше max_age_hours,
 постранично по PAGE_SIZE, до MAX_PAGES страниц); лимит API — 120 запросов в минуту с IP.
 Вакансия — как у HH: карточка без черновика, отклик пользователь делает на сайте.
+Тот же класс ищет и под анкету пользователя (matching.py): слова профессии, `town` — его город.
 """
 
 from __future__ import annotations
@@ -54,6 +55,8 @@ class SuperJobSource:
         max_age_hours: float,
         catalogues: Sequence[int] = (),
         remote_only: bool = False,
+        town: str | None = None,
+        max_pages: int = MAX_PAGES,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
         self._fetcher = fetcher
@@ -61,6 +64,8 @@ class SuperJobSource:
         self._queries = list(queries)
         self._catalogues = list(catalogues)
         self._remote_only = remote_only
+        self._town = town  # название города: API принимает его вместо id
+        self._max_pages = max_pages
         self._max_age = timedelta(hours=max_age_hours)
         self._clock = clock
 
@@ -78,7 +83,7 @@ class SuperJobSource:
 
     async def _search(self, query: str, since: datetime) -> list[dict[str, Any]]:
         rows: list[dict[str, Any]] = []
-        for page in range(MAX_PAGES):
+        for page in range(self._max_pages):
             objects, more = await self._page(query, since, page)
             rows.extend(objects)
             if not more or not objects:
@@ -100,6 +105,8 @@ class SuperJobSource:
             params["catalogues"] = ",".join(str(c) for c in self._catalogues)
         if self._remote_only:
             params["place_of_work"] = REMOTE_PLACE
+        if self._town:
+            params["town"] = self._town
         url = str(httpx.URL(API_URL, params=params))
         headers = {"X-Api-App-Id": self._key or "", "Accept": "application/json"}
         try:
@@ -164,7 +171,7 @@ def _description(row: dict[str, Any]) -> str:
                            ("Условия", "compensation"))  # fmt: skip
         if (text := _text(row.get(key)))
     ]
-    # «Опыт работы от 3 лет» — так требование увидит скоринг (scoring._EXP_PATTERNS)
+    # «Опыт работы от 3 лет» — так требование увидят скоринг и обучение (experience.py)
     terms = [
         f"Опыт работы {_title(row.get('experience'))}" if _title(row.get("experience")) else "",
         _title(row.get("type_of_work")),

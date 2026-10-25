@@ -27,7 +27,7 @@ from freelance_bot.scoring import DIRECTION_LABELS
 
 PLATFORM_NAMES: dict[str, str] = {
     "fl": "FL.ru", "kwork": "Kwork", "work24": "Work24", "freelance_ru": "Freelance.ru",
-    "workzilla": "Work-zilla", "hh": "HH.ru", "superjob": "SuperJob",
+    "workzilla": "Work-zilla", "hh": "HH.ru", "superjob": "SuperJob", "trudvsem": "Работа России",
 }  # fmt: skip
 KWORK_TERMS_URL = "https://kwork.ru/terms_of_service"
 KWORK_WARNING = (
@@ -224,8 +224,9 @@ def format_vacancy_card(p: Project, r: ScoreResult | None, tz: str, summary: str
     lines = [f"💼 <b>{esc(p.title)}</b>", _employer(p)]
     if summary:
         lines.append(f"{SUMMARY_MARK} {esc(summary)}")
-    # у HH даты публикации нет — только время уведомления Хэдди
-    when = "уведомление от" if p.platform == "hh" else "опубликована"
+    # у HH даты публикации нет — только время уведомления Хэдди; «Работа России» отдаёт
+    # дату последнего изменения вакансии
+    when = {"hh": "уведомление от", "trudvsem": "обновлена"}.get(p.platform, "опубликована")
     lines.append(f"🌐 {site} · 🕐 {when} {esc(fmt_time(p.published_at, tz))}")
     lines.append(f"💵 зарплата: {esc(_salary(p))}")
     if r is not None:
@@ -289,7 +290,7 @@ def format_learned(
     """Ответ на причину: что именно запомнил и как это меняет отбор."""
     lines = [f"🧠 <b>Запомнил</b> — {esc(learning.REASONS.get(reason, reason))}:"]
     lines.extend(f"• {esc(learning.describe(c))}" for c in changes)
-    if any(c.kind in ("topic", "level", "office") for c in changes):
+    if any(c.kind in ("topic", "level", "skill", "office") for c in changes):
         lines.append(
             f"Проходной балл — {min_score}: похожие будут приходить реже, "
             "а повторная отметка усилит штраф."

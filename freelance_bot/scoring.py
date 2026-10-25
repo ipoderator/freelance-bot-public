@@ -17,6 +17,7 @@ from datetime import datetime
 
 from freelance_bot import learning
 from freelance_bot.config import Settings
+from freelance_bot.experience import required_years, years_word
 from freelance_bot.models import Project, ScoreResult
 
 try:  # общий матчер каркаса; пока его нет — приватная копия с той же семантикой
@@ -44,6 +45,9 @@ DIRECTION_LABELS: dict[str, str] = {
     "ai_agents": "AI-агенты и LLM",
     "automation": "автоматизация и интеграции",
     "parsing": "парсинг и сбор данных",
+    # отбор под анкету по резюме (matching.py)
+    "profession": "профессия из резюме",
+    "skills": "навыки из резюме",
 }
 RELEVANCE_MAX = 30.0  # лучшее направление
 RELEVANCE_REST_MAX = 10.0  # остальные направления вместе
@@ -206,13 +210,6 @@ def extract_client_requirements(text: str) -> list[str]:
 
 # --- требования к исполнителю, которые профиль не выполняет ------------------
 
-_EXP_PATTERNS = [
-    re.compile(
-        r"(?:опыт\w*|стаж\w*)(?:\s+работы)?\s+(?:от|не\s+менее|более|свыше|минимум)\s+(\d+)(?:-х)?\s*\+?\s*(?:лет|года|год)\b"
-    ),
-    re.compile(r"\b(\d+)(?:-х)?\s*\+?\s*(?:лет|года)\s+(?:опыта|стажа|работы)\b"),
-    re.compile(r"(?:опыт\w*|стаж\w*)(?:\s+работы)?\s+(\d+)\s*\+?\s*(?:лет|года)\b"),
-]
 _LEGAL_WORD_RE = re.compile(r"\b(?:самозанят\w*|ип|юрлиц\w*|юр\.?\s?лиц\w*|ооо)\b")
 _LEGAL_NEED_RE = re.compile(
     r"\b(?:только|обязательно|обязательн\w+|необходим\w*|наличие|требуется|должен|должны|иметь|"
@@ -233,11 +230,9 @@ _REVIEWS_RES = [
 def _performer_requirements(text: str, experience_years: float = 0.0) -> list[str]:
     normalized = _norm(text)
     found: list[str] = []
-    for pattern in _EXP_PATTERNS:
-        years = [int(m.group(1)) for m in pattern.finditer(normalized)]
-        if any(y >= experience_limit(experience_years) for y in years):
-            found.append(f"опыт от {max(years)} лет")
-            break
+    years = required_years(normalized)
+    if years is not None and years >= experience_limit(experience_years):
+        found.append(f"опыт от {years} {years_word(years)}")
     for sentence in _sentences(normalized):
         if _LEGAL_WORD_RE.search(sentence) and _LEGAL_NEED_RE.search(sentence):
             found.append("нужен статус ИП/самозанятого/юрлица")

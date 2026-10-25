@@ -2,7 +2,9 @@
 
 «👎 Не подходит» под карточкой и причина кнопкой — правило в таблице `lessons`:
 - 🧭 не моя тема — слова из названия (без слов профиля и общих) получают штраф;
-- 🎓 не мой уровень — слова уровня из названия (senior, ведущий, junior…) — штраф;
+- 🛠 не мои навыки — технологии из текста, которых нет в профиле (kubernetes, java…), — штраф;
+- 🎓 не мой уровень — слова уровня из названия (senior, ведущий, junior…) — штраф, а стаж
+  из описания («опыт коммерческой разработки от 3 лет») — с таким и большим не присылать;
 - 🏢 офис/переезд — вакансии без удалённой работы получают штраф;
 - 💰 мало платят — заказы/вакансии с указанной оплатой не выше этой больше не приходят;
 - 🚫 компания — вакансии компании больше не приходят.
@@ -19,11 +21,16 @@ from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 
 from freelance_bot.config import Settings
+from freelance_bot.experience import required_years, years_word
 from freelance_bot.models import VACANCY_PLATFORMS, Lesson, Project
 from freelance_bot.textmatch import find_terms
 
 TOPIC_STEP = -15  # за отметку «не моя тема»: обычно ниже проходного; повтор — сильнее
 TOPIC_FLOOR = -45
+# Навык ищется во всём тексте, а там его пишут и в «будет плюсом» — штраф мягче темы
+SKILL_STEP = -10
+SKILL_FLOOR = -30
+MAX_SKILLS = 6  # технологий из одной вакансии
 LEVEL_STEP = -15
 LEVEL_FLOOR = -30
 OFFICE_STEP = -15
@@ -36,6 +43,7 @@ MAX_TERMS = 5  # слов из одного названия
 
 REASONS: dict[str, str] = {
     "topic": "🧭 Не моя тема",
+    "skills": "🛠 Не мои навыки",
     "pay": "💰 Мало платят",
     "office": "🏢 Офис / переезд",
     "company": "🚫 Компания",
@@ -60,7 +68,21 @@ GENERIC_TERMS = frozenset(
      "for", "with", "удаленно", "удаленная", "удаленный", "офис", "город", "москва",
      "оплата", "зарплата", "день", "дня", "дней", "месяц"}
 )  # fmt: skip
+# Технологии, которые есть почти в любой IT-вакансии, и служебные английские слова:
+# «не мои навыки» за них не штрафует
+GENERIC_SKILLS = frozenset(
+    {"it", "api", "apis", "rest", "restful", "http", "https", "json", "xml", "yaml", "web",
+     "sql", "git", "github", "gitlab", "linux", "unix", "ci", "cd", "oop", "solid", "dry",
+     "kiss", "mvp", "agile", "scrum", "kanban", "jira", "confluence", "english", "upper",
+     "intermediate", "advanced", "pre", "b1", "b2", "c1", "c2", "hr", "ok", "pro", "plus",
+     "online", "office", "remote", "team", "the", "and", "for", "with", "of", "to", "in",
+     "on", "an", "is", "are", "we", "you", "our", "your", "be", "by", "as", "or", "at",
+     "from", "new", "etc", "ru", "com", "www", "pdf", "ms", "word"}
+)  # fmt: skip
 _WORD_RE = re.compile(r"[a-zа-я0-9+#]+")
+# «kubernetes», «node.js», «c++», «c#», «1с» — латиница и 1С; ссылки и почта вырезаются
+_SKILL_RE = re.compile(r"(?<![\w.+#])(?:1[cс]|[a-z][a-z0-9]*(?:\.[a-z0-9]+|[+#]+)?)(?![\w+#])")
+_LINK_RE = re.compile(r"(?:https?://|www\.|t\.me/)\S+|\S+@\S+")
 _ENDINGS = (
     "ами", "ями", "ого", "его", "ому", "ему", "ыми", "ими", "ой", "ый", "ий", "ая", "яя",
     "ое", "ее", "ые", "ие", "ов", "ев", "ам", "ям", "ах", "ях", "ом", "ем", "а", "я", "ы",
@@ -131,8 +153,43 @@ def topic_terms(title: str, settings: Settings) -> list[str]:
     return terms[:MAX_TERMS]
 
 
+def skill_terms(p: Project, settings: Settings) -> list[str]:
+    """Технологии из названия и описания, которых нет в профиле: сначала из названия."""
+    profile = _profile_words(settings)
+    terms: list[str] = []
+    for word in _SKILL_RE.findall(_skill_text(p)):
+        word = word.replace("1c", "1с")
+        if len(word) < 2 or word in terms or find_terms(word, LEVEL_TERMS):
+            continue
+        if all(_known_skill(part, profile) for part in _WORD_RE.findall(word)):
+            continue
+        terms.append(word)
+    return terms[:MAX_SKILLS]
+
+
+def _known_skill(word: str, profile: set[str]) -> bool:
+    """«postgres» ↔ «postgresql» — одно; «go» не часть «google»: короткие — только целиком."""
+    return word in GENERIC_SKILLS or any(
+        word == k or (len(k) >= 3 and word.startswith(k)) or (len(word) >= 4 and k.startswith(word))
+        for k in profile
+    )
+
+
+def _skill_text(p: Project) -> str:
+    return _LINK_RE.sub(" ", _full_text(p)).replace("1c", "1с")
+
+
+def _has_skill(text: str, skill: str) -> bool:
+    """Навык — целым словом: «java» не находится в «javascript», зато в «java-разработчик»."""
+    return re.search(rf"(?<![\w.+#]){re.escape(skill)}(?![\w+#])", text) is not None
+
+
 def level_terms(title: str) -> list[str]:
     return find_terms(_norm(title), LEVEL_TERMS)
+
+
+def _full_text(p: Project) -> str:
+    return _norm(f"{p.title}\n{p.description or ''}")
 
 
 def is_remote(p: Project) -> bool:
@@ -176,8 +233,16 @@ def learn(
 
     if reason == "topic":
         return [step("topic", t, TOPIC_STEP, TOPIC_FLOOR) for t in topic_terms(p.title, settings)]
+    if reason == "skills":
+        return [step("skill", t, SKILL_STEP, SKILL_FLOOR) for t in skill_terms(p, settings)]
     if reason == "level":
-        return [step("level", t, LEVEL_STEP, LEVEL_FLOOR) for t in level_terms(p.title)]
+        changes = [step("level", t, LEVEL_STEP, LEVEL_FLOOR) for t in level_terms(p.title)]
+        years = required_years(_full_text(p))
+        if years is not None:
+            # порог — меньший из отмеченных: «от 3 лет», потом «от 2 лет» → с 2 лет
+            old = current.get(("experience", ""))
+            changes.append(Change("experience", "", min(years, old) if old else years))
+        return changes
     if reason == "office":
         return [step("office", "", OFFICE_STEP, OFFICE_FLOOR)]
     if reason == "pay":
@@ -200,11 +265,17 @@ def learn(
 def apply(p: Project, lessons: Iterable[Lesson]) -> Lessons:
     """Поправка к баллу и отсечение по правилам пользователя."""
     title = _norm(p.title or "")
+    text = _skill_text(p)
     penalty, bonus, parts = 0, 0, []
     excluded: str | None = None
     vacancy = p.platform in VACANCY_PLATFORMS
+    years = required_years(text)
     for x in lessons:
-        if x.kind in ("topic", "level") and x.weight and find_terms(title, [x.value]):
+        found = (
+            _has_skill(text, x.value) if x.kind == "skill"
+            else x.kind in ("topic", "level") and bool(find_terms(title, [x.value]))
+        )  # fmt: skip
+        if found and x.weight:
             if x.weight < 0:
                 penalty += -x.weight
             else:
@@ -219,6 +290,10 @@ def apply(p: Project, lessons: Iterable[Lesson]) -> Lessons:
                 excluded = f"мало платят: по вашей отметке — не выше {_rub(x.weight)} ₽"
         elif x.kind == "company" and vacancy and company(p) and _norm(company(p)) == x.value:
             excluded = "компания в вашем стоп-листе"
+        elif x.kind == "experience" and years is not None and years >= x.weight > 0:
+            excluded = excluded or (
+                f"нужен опыт от {years} {years_word(years)}: по вашей отметке — не ваш уровень"
+            )
     points = min(bonus, BONUS_CAP) - min(penalty, PENALTY_CAP)
     reasons = (f"🧠 Ваши отметки: {', '.join(parts)}",) if parts else ()
     return Lessons(points, reasons, excluded)
@@ -236,6 +311,11 @@ def describe(change: Change) -> str:
     """Одно правило словами — для ответа на отметку и /learned."""
     if change.kind in ("topic", "level"):
         return f"«{change.value}» в названии: {_signed(change.weight)} к баллу"
+    if change.kind == "skill":
+        return f"«{change.value}» в тексте: {_signed(change.weight)} к баллу"
+    if change.kind == "experience":
+        n = change.weight
+        return f"где нужен опыт от {n} {years_word(n)} и больше — не присылаю"
     if change.kind == "office":
         return f"вакансии без удалённой работы: {_signed(change.weight)} к баллу"
     if change.kind == "pay":
@@ -251,7 +331,10 @@ def nothing_to_learn(reason: str) -> str:
     return {
         "topic": "В названии только слова из вашего профиля и общие — запоминать нечего. "
         "Выберите другую причину.",
-        "level": "В названии нет уровня (senior, ведущий, junior…). Выберите другую причину.",
+        "skills": "В тексте нет технологий, которых не было бы в вашем профиле, — запоминать "
+        "нечего. Выберите другую причину.",
+        "level": "В названии нет уровня (senior, ведущий, junior…), в описании — стажа "
+        "(«опыт от 3 лет»). Выберите другую причину.",
         "pay": "Оплата не указана — нечего сравнивать. Выберите другую причину.",
         "company": "Компания не указана. Выберите другую причину.",
     }.get(reason, "Запоминать нечего.")

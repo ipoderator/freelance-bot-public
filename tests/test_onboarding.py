@@ -154,9 +154,7 @@ def _sources_on(settings, off: tuple[str, ...] = ()):
 @pytest.fixture
 def env():
     settings = load_settings(ROOT / "settings.toml", ROOT / "no-such.env")
-    settings = replace(
-        settings, owner_id=OWNER, public_enabled=True, sources=_sources_on(settings)
-    )
+    settings = replace(settings, owner_id=OWNER, public_enabled=True, sources=_sources_on(settings))
     storage = Storage(":memory:", clock=lambda: NOW)
     handlers = BotHandlers(settings, storage, None)
     yield SimpleNamespace(settings=settings, storage=storage, handlers=handlers)
@@ -205,10 +203,16 @@ async def test_full_flow_with_pasted_resume(env):
     assert ("⬜ HH.ru (вакансии)", "ob:plat:hh") in [
         (b.text, b.callback_data) for row in chat.last_query.markup.inline_keyboard for b in row
     ]
-    replies = await chat.press("ob:plat_done")
+    replies = await chat.press("ob:plat_done")  # SuperJob — вакансии: спросить о городах
+    assert "но она удалённая" in replies[0]  # города в резюме нет — о других не спрашивать
+    assert chat.buttons() == [("✅ Удалённая работа", "ob:loc:remote"), ("Готово ➡️", "ob:loc_done")]
+    replies = await chat.press("ob:loc_done")
     assert replies[0].startswith("Как часто присылать") and "МСК" in replies[0]
     assert [d for _, d in chat.buttons()] == [
-        "ob:freq:hourly", "ob:freq:twice", "ob:freq:daily", "ob:freq_own",
+        "ob:freq:hourly",
+        "ob:freq:twice",
+        "ob:freq:daily",
+        "ob:freq_own",
     ]
     assert env.storage.get_user(GUEST).completed_at is None  # анкета ещё не пройдена
     replies = await chat.press("ob:freq:hourly")
@@ -219,7 +223,7 @@ async def test_full_flow_with_pasted_resume(env):
     assert user.data["schedule"] == {"every_min": 60, "start_hour": 9, "end_hour": 21}
     assert user.step == "done" and user.completed_at is not None
     assert user.data["full_name"] == "Петров Пётр Петрович"
-    assert user.data["platforms"] == ["fl", "freelance_ru", "work24", "superjob"]
+    assert user.data["platforms"] == ["fl", "freelance_ru", "work24", "superjob", "trudvsem"]
     assert "Петров Пётр Петрович" in env.storage.users()[0].data["full_name"]
     assert len(replies) == 2 and replies[1].startswith(MATCHES_NONE)  # база пуста
     assert "Новые будут приходить раз в час, 9:00–21:00 (МСК)" in replies[1]
@@ -246,6 +250,7 @@ async def _finish_signup(chat: Chat, direction: str = "backend") -> list[str]:
     await chat.press(f"ob:dir:{direction}")
     await chat.press("ob:dir_done")
     await chat.press("ob:plat_all")
+    await chat.press("ob:loc_done")
     return await chat.press("ob:freq:hourly")
 
 
@@ -265,10 +270,10 @@ async def test_first_matches_sent_right_after_signup(env):
     replies = await _finish_signup(Chat(env.handlers, GUEST))
     assert replies[0].startswith("Готово, Пётр Петрович!")
     matches = replies[1]
-    assert "Заказы под вашу анкету</b> — 2" in matches and MATCHES_HINT in matches
+    assert "Заказы и вакансии под вашу анкету</b> — 2" in matches and MATCHES_HINT in matches
     assert matches.index("REST API на Django") < matches.index(backend)  # свежие сверху
     for external_id in ("3", "4", "5", "6"):
-        assert f"/{external_id}\"" not in matches
+        assert f'/{external_id}"' not in matches
     assert "Выберите кнопкой" not in matches  # готовых откликов посторонним пока нет
 
 
@@ -297,7 +302,7 @@ async def test_matches_button_lists_all_and_owner_gets_own_hh(env):
     pages = await guest.press("ob:matches")
     assert len(pages) > 1 and all(len(p) <= 4096 for p in pages)  # не влезает в одно
     text = "\n".join(pages)
-    assert "Заказы под вашу анкету</b> — 20" in pages[0] and "<b>20.</b>" in pages[-1]
+    assert "Заказы и вакансии под вашу анкету</b> — 20" in pages[0] and "<b>20.</b>" in pages[-1]
     assert "/hh/vac" not in text  # подборка HH владельца посторонним не видна
     assert "Новые будут приходить" in pages[-1]
     assert guest.last_query.markup == "unchanged"  # кнопку можно нажать ещё раз
@@ -390,6 +395,7 @@ async def test_without_resume_directions_are_chosen_by_hand(env):
     assert env.storage.get_user(GUEST).data["directions"] == ["parsing"]
     await chat.press("ob:dir_done")
     await chat.press("ob:plat_all")
+    await chat.press("ob:loc_done")
     assert "Напишите своё расписание" in (await chat.press("ob:freq_own"))[0]
     assert await chat.say("иногда") == [FREQUENCY_ERROR]
     assert await chat.say("каждые 5 минут") == [FREQUENCY_ERROR]  # чаще 15 минут нельзя
@@ -506,11 +512,16 @@ async def test_restart_and_forget(env):
     await chat.press("ob:dir:backend")
     await chat.press("ob:dir_done")
     await chat.press("ob:plat_all")
+    await chat.press("ob:loc_done")
     await chat.press("ob:freq:hourly")
     replies = await chat.command("start")  # пройдена — показывает анкету
     assert "Петров Пётр Петрович" in replies[0]
     assert [d for _, d in chat.buttons()] == [
-        "ob:matches", "ob:freq_edit", "ob:restart", "ob:forget",
+        "ob:matches",
+        "ob:loc_edit",
+        "ob:freq_edit",
+        "ob:restart",
+        "ob:forget",
     ]
     assert await chat.say("что дальше?") == [PUBLIC_HELP]
 
@@ -592,3 +603,140 @@ def test_profile_text_escapes_resume_words(env):
     }  # fmt: skip
     text = format_profile(data, env.settings)
     assert "&lt;b&gt;C++&lt;/b&gt;" in text and "a &amp; b" in text and "1 год" in text
+
+
+def test_profile_text_shows_profession_city_jobs_skills_education(env):
+    profile = {"directions": [], "keywords": [], "experience_years": 6.8,
+               "built_bots_or_agents": False, "profession": "Повар горячего цеха",
+               "city": "Воронеж", "skills": ["Горячий цех", "<Санитария>"],
+               "education": ["Профессиональное училище · поварское дело · 2020"],
+               "jobs": [f"Повар — Кафе {i} (2020–2023)" for i in range(6)]}  # fmt: skip
+    text = format_profile({"directions": [], "profile": profile}, env.settings)
+    assert "💼 Профессия: Повар горячего цеха" in text and "📍 Город: Воронеж" in text
+    assert "6,8 года" in text and "Горячий цех, &lt;Санитария&gt;" in text
+    assert "🎓 Образование: Профессиональное училище" in text
+    assert text.count("Повар — Кафе") == 4  # мест работы — не больше четырёх
+
+
+async def test_cook_resume_gets_cook_vacancies_in_own_city(env):
+    """Не разработчик: IT-направления и биржи не предлагаются, вакансии ищутся по профессии
+    и городу из резюме, чужой город, чужая профессия и лишний стаж отсекаются."""
+    cook = (ROOT / "tests" / "fixtures" / "resumes" / "08_cook.txt").read_text(encoding="utf-8")
+    env.storage.upsert_project(_project("fl", "1", "Бэкенд на Python и FastAPI", 1))
+
+    def vacancy(vid, title, area="Воронеж", description=""):
+        p = _project("superjob", vid, title, 2, description or f"Обязанности: {title}")
+        return replace(p, extra={"area": area})
+
+    asked = []
+
+    async def search(data):
+        asked.append(data["profile"]["profession"])
+        return [
+            vacancy("v1", "Повар-универсал в столовую"),
+            vacancy("v2", "Повар", "Москва"),
+            vacancy("v3", "Официант"),
+            vacancy("v4", "Шеф-повар", description="Опыт работы от 10 лет"),
+            vacancy("v5", "Повар на заготовки", "Воронеж, удалённо"),
+        ]
+
+    env.handlers.onboarding.search = search
+    chat = Chat(env.handlers, GUEST)
+    await _to_resume_step(chat)
+    review = (await chat.say(cook))[-1]
+    assert "💼 Профессия: Повар горячего цеха" in review and "📍 Город: Воронеж" in review
+    assert "🎯 Ищу: вакансии «Повар горячего цеха»" in review
+    replies = await chat.press("ob:ok")  # без шага IT-направлений
+    assert "Где искать?" in replies[0]
+    plats = [d for _, d in chat.buttons()]  # только вакансии: биржи — заказы на разработку
+    assert plats == ["ob:plat:hh", "ob:plat:superjob", "ob:plat:trudvsem", "ob:plat_all",
+                     "ob:plat_done"]
+    await chat.press("ob:plat_done")
+    await chat.press("ob:loc_done")
+    replies = await chat.press("ob:freq:hourly")
+    assert asked == ["Повар горячего цеха"]
+    matches = replies[1]
+    assert "под вашу анкету</b> — 2" in matches
+    assert "/superjob/v1" in matches and "/superjob/v5" in matches
+    for hidden in ("/fl/1", "/superjob/v2", "/superjob/v3", "/superjob/v4"):
+        assert hidden not in matches
+
+
+async def test_search_failure_keeps_collected_matches(env):
+    env.storage.upsert_project(_project("fl", "1", "Бэкенд на Python и FastAPI", 1))
+
+    async def broken(data):
+        raise RuntimeError("SuperJob не ответил")
+
+    env.handlers.onboarding.search = broken
+    replies = await _finish_signup(Chat(env.handlers, GUEST))
+    assert "/fl/1" in replies[1]
+
+
+async def test_no_vacancies_in_city_is_said_plainly(env):
+    cleaner = (ROOT / "tests" / "fixtures" / "resumes" / "05_cleaner.txt").read_text(
+        encoding="utf-8"
+    )
+
+    async def nothing(data):
+        return []
+
+    env.handlers.onboarding.search = nothing
+    chat = Chat(env.handlers, GUEST)
+    await _to_resume_step(chat)
+    await chat.say(cleaner)
+    await chat.press("ob:ok")
+    await chat.press("ob:plat_done")
+    await chat.press("ob:loc_done")
+    replies = await chat.press("ob:freq:hourly")
+    assert "В городе Елец на SuperJob сейчас нет вакансий «Уборщик помещений»" in replies[1]
+
+
+async def test_signup_asks_about_other_cities_and_remote(env):
+    """Вакансия подходит, но в другом городе или удалённая — человек сам решает, отсекать ли;
+    решение можно сменить после анкеты, она остаётся пройденной."""
+    cook = (ROOT / "tests" / "fixtures" / "resumes" / "08_cook.txt").read_text(encoding="utf-8")
+
+    def vacancy(vid, area):
+        return replace(_project("superjob", vid, "Повар", 2, "Обязанности: повар"),
+                       extra={"area": area})  # fmt: skip
+
+    async def search(data):
+        return [vacancy("near", "Воронеж"), vacancy("far", "Москва"),
+                vacancy("home", "Воронеж, удалённо")]  # fmt: skip
+
+    env.handlers.onboarding.search = search
+    chat = Chat(env.handlers, GUEST)
+    await _to_resume_step(chat)
+    await chat.say(cook)
+    await chat.press("ob:ok")
+    replies = await chat.press("ob:plat_done")
+    assert "но она не в городе Воронеж или удалённая — присылать такие?" in replies[0]
+    assert chat.buttons() == [
+        ("⬜ Другие города, не только Воронеж", "ob:loc:other"),
+        ("✅ Удалённая работа", "ob:loc:remote"),
+        ("Готово ➡️", "ob:loc_done"),
+    ]
+    await chat.press("ob:loc:other")
+    await chat.press("ob:loc:remote")
+    await chat.press("ob:loc:nonsense")  # чужое значение ничего не меняет
+    assert env.storage.get_user(GUEST).data["location"] == ["other"]
+    await chat.press("ob:loc_done")
+    replies = await chat.press("ob:freq:hourly")
+    assert "📍 Вакансии: любой город, без удалённых" in replies[0]
+    matches = replies[1]
+    assert "/superjob/near" in matches and "/superjob/far" in matches
+    assert "/superjob/home" not in matches
+    assert matches.index("/superjob/near") < matches.index("/superjob/far")  # свой город выше
+
+    done_at = env.storage.get_user(GUEST).completed_at
+    await chat.command("start")
+    assert ("📍 Другие города и удалёнка", "ob:loc_edit") in chat.buttons()
+    await chat.press("ob:loc_edit")
+    await chat.press("ob:loc:other")
+    await chat.press("ob:loc:remote")
+    assert await chat.press("ob:loc_done") == ["📍 Готово, вакансии: Воронеж и удалённые."]
+    user = env.storage.get_user(GUEST)
+    assert user.step == "done" and user.completed_at == done_at and "editing" not in user.data
+    pages = await chat.press("ob:matches")
+    assert "/superjob/home" in pages[0] and "/superjob/far" not in pages[0]

@@ -16,6 +16,7 @@ from pathlib import Path
 from freelance_bot.config import ConfigError, Settings, load_settings
 from freelance_bot.drafting import make_drafter
 from freelance_bot.http import Fetcher
+from freelance_bot.matching import AnketaVacancies, VacancySearch, completed_anketa
 from freelance_bot.models import PLATFORMS, Platform
 from freelance_bot.pipeline import ConsoleNotifier, Pipeline
 from freelance_bot.profile import ProfileError, load_profile
@@ -146,10 +147,16 @@ def build_sources(
     include_disabled: bool,
     storage: Storage | None = None,
 ) -> list[Source]:
-    """`storage` — чтобы Work24 и Freelance.ru не открывали карточки, которые уже есть в базе."""
+    """`storage` — чтобы Work24 и Freelance.ru не открывали карточки, которые уже есть в базе,
+    и чтобы вакансии SuperJob и «Работы России» искались под пройденную анкету владельца."""
     fetcher = Fetcher()
     _fetchers.append(fetcher)
     sources: list[Source] = []
+    search = VacancySearch(settings)
+
+    def anketa() -> dict | None:
+        return completed_anketa(storage, settings.owner_id) if storage is not None else None
+
     for name in enabled_platforms(settings, platform, include_disabled):
         src = settings.sources[name]
         known = (
@@ -185,6 +192,9 @@ def build_sources(
                     remote_only=src.remote_only,
                 )  # fmt: skip
             )
+            sources.append(AnketaVacancies("superjob", search, anketa))
+        elif name == "trudvsem":  # своих слов поиска у владельца нет — только под анкету
+            sources.append(AnketaVacancies("trudvsem", search, anketa))
         elif name == "workzilla":
             own = Fetcher()  # cookie сессии не попадают в общий клиент других площадок
             _fetchers.append(own)

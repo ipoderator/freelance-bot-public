@@ -641,3 +641,15 @@ def test_requirement_item_keeps_its_own_commas_when_items_split_by_semicolon():
     assert extract_client_requirements("В отклике укажите: опыт, сроки и цену") == [
         "В отклике укажите: опыт; сроки и цену"
     ]
+
+
+def test_experience_with_words_between_is_penalized(make_project, settings):
+    # «опыт коммерческой разработки от 3 лет» раньше не находился: слова между «опыт» и «от»
+    base = mk(make_project, description="Нужен бэкенд на Python.")
+    hard = mk(
+        make_project, description="Нужен бэкенд на Python. Опыт коммерческой разработки от 3 лет."
+    )
+    assert score(base, settings).score - score(hard, settings).score == (
+        settings.requirement_penalty
+    )
+    assert "⚠ требование: опыт от 3 лет" in " ".join(score(hard, settings).reasons)

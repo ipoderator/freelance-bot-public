@@ -1,7 +1,7 @@
 <!-- autopilot:start -->
 # Freelance Bot
 
-Telegram-бот для фрилансера: находит свежие заказы на FL.ru, Kwork, Work24, Freelance.ru и Work-zilla под профиль владельца и готовит персональные отклики; присылает подходящие вакансии HH.ru (без откликов).
+Telegram-бот для фрилансера: находит свежие заказы на FL.ru, Kwork, Work24, Freelance.ru и Work-zilla под профиль владельца и готовит персональные отклики; присылает подходящие вакансии HH.ru, SuperJob и «Работы России» (без откликов).
 
 Архитектура, поток данных, границы модулей: `docs/architecture.md`. Проверенные факты о площадках: `docs/platforms.md`. Почему так решено: `docs/adr/`. Термины: `CONTEXT.md`.
 
@@ -21,6 +21,7 @@ Telegram-бот для фрилансера: находит свежие зак�
 | `.venv/bin/python -m freelance_bot workzilla-session --from <API_ANYTHING_HOME>/sessions/work-zilla.json` | сессия Work-zilla из api-anything → `WORKZILLA_COOKIE`, `WORKZILLA_AGENT_ID` в `.env` (600); значения не печатает |
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform workzilla --include-disabled` | разовый прогон Work-zilla: пока лента демонстрационная — ошибка «лента демонстрационная», ничего не сохраняется |
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform superjob --include-disabled --max-age-hours 48` | разовый прогон SuperJob (официальный API, нужен `SUPERJOB_API_KEY`) |
+| `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform trudvsem` | разовый прогон «Работы России»: ищет только под пройденную анкету владельца в этой базе, без неё — 0 |
 | `.venv/bin/pip install -e '.[login]' && .venv/bin/python -m freelance_bot hh-login` | разовый вход в свой Telegram для вакансий HH: QR-код (`--code` — по коду), сессия → `.env` (600); интерактивно, запускает пользователь |
 | `.venv/bin/python -m freelance_bot --db data/dry-run.sqlite3 once --dry-run --console --platform hh --include-disabled --max-age-hours 48` | разовый прогон HH: читает чат с @hh_rabota_bot его сессией (только на машине, где бот не запущен) |
 | `.venv/bin/python -m freelance_bot setup-telegram` | getMe, setMyCommands, подсказка про TELEGRAM_OWNER_ID; без токена — шаги, код 1 |
@@ -36,12 +37,13 @@ Telegram-бот для фрилансера: находит свежие зак�
 - `settings.toml` — источники, URL лент, направления и ключевые слова, исключения, min_score; правится без кода.
 - `freelance_bot/scoring.py` — балл и отсечение; веса и общие слова `WEAK_TERMS` — константы в файле.
 - `freelance_bot/pricing.py` — ориентировочная цена и срок (вилки `TIERS`); подставляется вместо [ЦЕНА]/[СРОК] при показе.
-- `freelance_bot/sources/` — парсеры FL (RSS) и Kwork (HTML); Work24, Freelance.ru, Work-zilla — `work24.py`, `freelance_ru.py`, `workzilla.py` исполняют операции API Anything из `work24.json`, `freelance-ru.json`, `work-zilla.json` через общий `api_anything.py` (без Node.js); HH — `hh.py` читает сессией Telegram пользователя подборки бота @hh_rabota_bot (ADR 0009); SuperJob — `superjob.py`, официальный API с ключом приложения (ADR 0012); `freelance_bot/http.py` — ретраи и детектор блокировок.
+- `freelance_bot/sources/` — парсеры FL (RSS) и Kwork (HTML); Work24, Freelance.ru, Work-zilla — `work24.py`, `freelance_ru.py`, `workzilla.py` исполняют операции API Anything из `work24.json`, `freelance-ru.json`, `work-zilla.json` через общий `api_anything.py` (без Node.js); HH — `hh.py` читает сессией Telegram пользователя подборки бота @hh_rabota_bot (ADR 0009); SuperJob — `superjob.py`, официальный API с ключом приложения (ADR 0012); «Работа России» — `trudvsem.py`, открытые данные без ключа (ADR 0015); `freelance_bot/http.py` — ретраи и детектор блокировок.
 - `freelance_bot/drafting.py` (1100+ строк) + `profile/profile.toml` — черновики и валидатор; факты об опыте только из профиля.
 - `freelance_bot/summary.py` — суть заказа (📝) для карточки и `/last`.
 - `freelance_bot/policy.py` — `decide_mode`, `SENDERS`; `freelance_bot/storage.py` — SQLite и флаги.
-- `freelance_bot/learning.py` — самообучение (ADR 0013): «👎 Не подходит» + причина → правило в таблице `lessons`, поправка к баллу; `/learned` и кнопка «🧠 Обучение» — список правил и «забыть».
-- `freelance_bot/onboarding.py` — анкета публичного бота (ADR 0011): согласие → ФИО → обращение → резюме → направления → площадки, таблица `users`, частота уведомлений — `freelance_bot/schedule.py` (раз в час 9–21 по умолчанию или свой тайминг); `freelance_bot/resume.py` — текст из PDF/DOCX/TXT и ссылок Google/Яндекс Диска, разбор нейросетью с проверкой по тексту резюме или встроенный. Рассылка по анкетам — этап 2, ещё не сделан.
+- `freelance_bot/learning.py` — самообучение (ADR 0013): «👎 Не подходит» + причина → правило в таблице `lessons`, поправка к баллу или отсечение (тема и уровень — по названию; навыки — по всему тексту; стаж «опыт от N лет» — по описанию, `freelance_bot/experience.py`); `/learned` и кнопка «🧠 Обучение» — список правил и «забыть».
+- `freelance_bot/onboarding.py` — анкета публичного бота (ADR 0011): согласие → ФИО → обращение → резюме → направления → площадки → другие города и удалёнка (если выбраны вакансии), таблица `users`, частота уведомлений — `freelance_bot/schedule.py` (раз в час 9–21 по умолчанию или свой тайминг); `freelance_bot/resume.py` — текст из PDF/DOCX/TXT и ссылок Google/Яндекс Диска, разбор нейросетью с проверкой по тексту резюме или встроенный (профессия, город, стаж, места работы, навыки, образование; образцы разной вёрстки — `tests/fixtures/resumes/`). Рассылка по анкетам — этап 2, ещё не сделан.
+- `freelance_bot/matching.py` — подбор под анкету по резюме (ADR 0014): живой поиск SuperJob и «Работы России» по профессии и городу (`VacancySearch`), он же при сборе под анкету владельца (`AnketaVacancies`), отсечение вне анкеты (`outside_anketa`), отсечение того, что резюме не выполняет (`mismatch`: стаж, город и удалёнка по выбору в анкете, профессия, IT-вакансия не разработчику), порядок и повторы (`rank`); не разработчику — без IT-направлений и бирж.
 - `tests/fixtures/` — снятые ответы площадок; `data/` — SQLite (не в git).
 
 ## Инструменты разработки (для Claude Code, не для бота)
@@ -89,7 +91,7 @@ Claude применяет их сам по описанию; вызвать яв
 - Правила правды в откликах зависят от профиля: `experience_years` (стаж больше — ложь; «5 лет» запрещено при стаже < 5), `built_bots_or_agents` (нет — «делал ботов» запрещено); отбор — `[scoring] experience_years`.
 - Тесты берут профиль из `profile/profile.example.toml` (вымышленный «Иван»), а не из своего `profile.toml`; оба проверяет `tests/test_profile.py`.
 - Бот отвечает владельцу только в личном чате (`_is_owner`); в группе — отказ.
-- Публичный режим `[public] enabled` (ADR 0011): посторонним в личке — анкета (`_is_public`), команды владельца им закрыты. На сервере выключен до этапа 2 (рассылка). У владельца `/start` тоже сразу открывает анкету (заново — `/signup`), его меню — `/menu`; `profile.toml` анкета не трогает. Kwork в анкете не предлагать («давай пока без kwork»).
+- Публичный режим `[public] enabled` (ADR 0011): посторонним в личке — анкета (`_is_public`), команды владельца им закрыты. На сервере выключен до этапа 2 (рассылка). У владельца `/start` тоже сразу открывает анкету (заново — `/signup`), его меню — `/menu`; `profile.toml` анкета не трогает, но пройдена анкета — меню, `/last` и дайджест владельца отбирают по ней (`Pipeline.scoring_settings`, `anketa`; ADR 0015). Kwork в анкете не предлагать («давай пока без kwork»).
 - Стаж из резюме — по периодам мест работы в IT (`resume.profession_years`), а не по общей строке hh «Опыт работы — N лет»: она считает и работу не по профессии. Найдены периоды — они важнее ответа нейросети; поправить вручную — кнопка «✏️ Стаж» в анкете.
 - Ссылки на резюме — только Google Docs/Диск и Яндекс Диск (`resume.ALLOWED_HOST_SUFFIXES`): адрес присылает посторонний, а запрос идёт с сервера (SSRF). Резюме hh.ru по ссылке не скачивать. Файл резюме не хранить — только выжимку; в тестах — вымышленные ФИО (проверка утечек ловит настоящие).
 - `SENDERS` пуст, поэтому `auto` всегда деградирует в `draft` (ADR 0001); не добавлять отправку на биржи.
@@ -99,7 +101,9 @@ Claude применяет их сам по описанию; вызвать яв
 - Тесты не ходят в сеть; `tests/conftest.py` чистит переменные окружения.
 - Реальные команды `once`/`run` ходят в сеть; не запускать их в проверках.
 - Бот работает на сервере; не запускать `run` на Mac параллельно — Telegram отдаёт обновления одному процессу (Conflict).
+- «Работа России» (ADR 0015): фильтра по городу нет — регион узнаётся у API по названию города (`trudvsem.region_for`); город вакансии брать из адреса («г Елец»), не из региона — иначе «липецк» найдётся в «Липецкая область». Запрос ~5 с: площадки поиска под анкету опрашиваются параллельно, у «Работы России» 2 слова и до 2 страниц. robots.txt хоста `Disallow: /` — решение пользователя.
 - SuperJob API отдаёт не больше 40 вакансий за запрос: на `count=100` — 40 и `more: false`, остальное теряется. Листать по `PAGE_SIZE = 40` до `more: false` (`sources/superjob.py`).
+- Требуемый стаж в тексте — только `experience.required_years` (его зовут скоринг и обучение): у вилки «1–3 года» требование — нижняя граница, свою регулярку не заводить.
 - Отбор с отметками пользователя — только через `Pipeline.scoring_settings()` (или `replace(settings, lessons=…)`): голый `self.settings` правил из `lessons` не видит (ADR 0013).
 - Свой срок свежести площадки — `[sources.<p>] max_age_hours` (у SuperJob 72 ч); читать через `Settings.max_age_for(platform)`, а не `settings.max_age_hours`. Флаг `--max-age-hours` у `once` перекрывает и его.
 - HH: сайт и API hh.ru не трогать — парсинг запрещён условиями (п. 6.1.38), API без токена 403 (ADR 0009). Вакансии только из чата с @hh_rabota_bot; Хэдди ничего не отправлять (номера, кнопки) — только чтение.

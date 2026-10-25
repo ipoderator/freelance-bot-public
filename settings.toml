@@ -32,7 +32,7 @@ interval_min = 60
 enabled = false
 # Площадки в анкете; «Везде» — все из списка. Kwork не предлагаем (решение 2026-10-24:
 # «давай пока без kwork»), Work-zilla — сессия владельца, выключен.
-platforms = ["fl", "freelance_ru", "work24", "hh", "superjob"]
+platforms = ["fl", "freelance_ru", "work24", "hh", "superjob", "trudvsem"]
 
 [storage]
 # Файл SQLite: дедупликация, статусы проектов, история откликов.
@@ -188,6 +188,18 @@ queries = ["python", "fastapi", "парсинг", "telegram бот"]
 catalogues = []
 # true — только удалённая работа («на дому»)
 remote_only = false
+
+[sources.trudvsem]
+# «Работа России» (trudvsem.ru) — вакансии из открытых данных портала, без ключа (ADR 0015,
+# docs/platforms.md, §8). robots.txt API закрывает его от роботов — подключено решением
+# пользователя 2026-10-25 («Добавить «Работа России»»). Ищет только под анкету: слова
+# профессии и регион города из резюме; своих слов поиска у владельца нет.
+enabled = true
+max_age_hours = 72
+interval_sec = 1800
+jitter_sec = 60
+mode = "notify"
+daily_auto_limit = 0
 
 [kwork]
 # Сколько коннектов Kwork бот может потратить за сутки. 0 — ни одного:

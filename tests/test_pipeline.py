@@ -559,3 +559,66 @@ async def test_owner_lessons_apply_to_collection(settings, storage, make_project
     reason = storage.get_score("fl", "20").excluded_reason
     assert reason == "мало платят: по вашей отметке — не выше 60 000 ₽"
     assert notifier.cards == []
+
+
+async def test_owner_anketa_drives_collection_last_and_digest(settings, storage, make_project):
+    """Анкета владельца пройдена — лента, /last и дайджест по ней: заказ разработчика из
+    очереди снимается, IT-вакансия продавцу не приходит, вакансия продавца — приходит."""
+    from freelance_bot.resume import builtin_profile, extract_text
+
+    owner = replace(settings, owner_id=4242, digest_enabled=True)
+    backend = make_project(external_id="30", published_at=NOW - timedelta(hours=1), **STRONG)
+    pipeline, _ = make_pipeline(owner, storage, [FakeSource("fl", [backend])])
+    await pipeline.run_once()
+    assert storage.get_status("fl", "30") == "queued"  # до анкеты — по settings.toml
+
+    text = (ROOT / "tests" / "fixtures" / "resumes" / "02_sales_assistant.txt").read_bytes()
+    profile = builtin_profile(extract_text(text, "r.txt"), settings)
+    data = {"directions": [], "profile": profile.to_dict(), "platforms": ["superjob", "trudvsem"]}
+    storage.save_user(4242, "done", data, consent=True, completed=True)
+
+    def vacancy(platform, vid, title):
+        return make_project(platform=platform, external_id=vid, title=title,
+                            description=f"Обязанности: {title}", extra={"area": "Липецк"},
+                            published_at=NOW - timedelta(hours=1), budget_max=50000,
+                            offers_count=None)  # fmt: skip
+
+    seller = vacancy("trudvsem", "t1", "Продавец-кассир")
+    python = vacancy("superjob", "s1", "Python-разработчик")
+    pipeline, _ = make_pipeline(owner, storage, [FakeSource("trudvsem", [seller]),
+                                                 FakeSource("superjob", [python])])  # fmt: skip
+    await pipeline.run_once()
+
+    assert pipeline.scoring_settings().experience_years == profile.experience_years
+    assert storage.get_status("superjob", "s1") == "filtered_out"
+    assert [p.external_id for p, _ in pipeline.digest_items()] == ["t1"]
+    assert storage.get_status("fl", "30") == "filtered_out"  # снят из очереди дайджеста
+    assert [p.external_id for p, _ in pipeline.offer_candidates()] == ["t1"]
+
+    storage.save_user(4242, "name", {}, completed=False)  # анкета заполняется заново
+    assert "30" in [p.external_id for p, _ in pipeline.offer_candidates()]
+
+
+async def test_digest_and_last_show_repeated_vacancy_once(settings, storage, make_project):
+    """Сеть выкладывает десятки одинаковых «Продавец-кассир» — в списке одна, остальные
+    в дайджест больше не придут."""
+    owner = replace(settings, digest_enabled=True)
+
+    def vacancy(vid, title="Продавец-кассир", company="Пятёрочка"):
+        return make_project(platform="superjob", external_id=vid, title=title,
+                            description="Обязанности: python, fastapi", budget_max=50000,
+                            extra={"area": "Липецк", "company": company},
+                            published_at=NOW - timedelta(hours=1), offers_count=None)  # fmt: skip
+
+    same = [vacancy(str(i)) for i in range(5)]
+    other = vacancy("9", company="Магнит")
+    orders = [make_project(external_id=f"f{i}", published_at=NOW - timedelta(hours=1), **STRONG)
+              for i in range(2)]  # fmt: skip — одинаковые заказы бирж — разные заказчики
+    pipeline, _ = make_pipeline(owner, storage, [FakeSource("superjob", [*same, other]),
+                                                 FakeSource("fl", orders)])  # fmt: skip
+    await pipeline.run_once()
+
+    items = pipeline.digest_items()
+    assert sorted(p.external_id for p, _ in items) == ["0", "9", "f0", "f1"]
+    assert storage.get_status("superjob", "3") == "filtered_out"
+    assert len(pipeline.offer_candidates(20)) == 4

@@ -287,3 +287,38 @@ def test_lessons_are_per_user_and_forget_deletes_them(storage: Storage) -> None:
     assert storage.lessons(7) == []
     assert [x.value for x in storage.lessons(8)] == ["педагог"]
     assert storage.clear_lessons(8) == 1 and storage.lessons(8) == []
+
+
+def test_lessons_rebuilt_for_skill_and_experience_keep_rules(tmp_path: Path) -> None:
+    # миграция 4: CHECK пересобран под skill/experience, правила версии 3 перенесены
+    from freelance_bot.storage import MIGRATIONS
+
+    db = tmp_path / "v3.sqlite3"
+    with sqlite3.connect(db) as conn:
+        for script in MIGRATIONS[:3]:
+            conn.executescript(script)
+        conn.execute("PRAGMA user_version = 3")
+        conn.execute(
+            "INSERT INTO lessons (tg_id, kind, value, weight, hits, example, created_at, "
+            "updated_at) VALUES (7, 'topic', 'аналитик', -30, 2, 'Бизнес-аналитик', 'a', 'b')"
+        )
+        with pytest.raises(sqlite3.IntegrityError):
+            conn.execute(
+                "INSERT INTO lessons (tg_id, kind, value, weight, created_at, updated_at) "
+                "VALUES (7, 'skill', 'java', -10, 'a', 'b')"
+            )
+    storage = Storage(db)
+    [old] = storage.lessons(7)
+    assert (old.kind, old.value, old.weight, old.hits, old.example) == (
+        "topic", "аналитик", -30, 2, "Бизнес-аналитик",
+    )  # fmt: skip
+    storage.save_lesson(7, "skill", "java", -10, "Java-разработчик")
+    storage.save_lesson(7, "experience", "", 3, "Python-разработчик")
+    assert {x.kind for x in storage.lessons(7)} == {"topic", "skill", "experience"}
+    with pytest.raises(sqlite3.IntegrityError):
+        storage.save_lesson(7, "nonsense", "x", 0, "")
+    storage.save_lesson(7, "topic", "педагог", -15, "")  # автонумерация после переноса
+    assert len({x.id for x in storage.lessons(7)}) == 4
+    storage.close()
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == len(MIGRATIONS) == 4

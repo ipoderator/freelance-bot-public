@@ -39,6 +39,7 @@ from telegram.ext import (
 from freelance_bot.config import Settings
 from freelance_bot.drafting import remaining_placeholders
 from freelance_bot.learning import REASONS, nothing_to_learn
+from freelance_bot.matching import VacancySearch
 from freelance_bot.models import Project, ScoreResult
 from freelance_bot.onboarding import PREFIX as ONBOARDING_PREFIX
 from freelance_bot.onboarding import PUBLIC_HELP, Onboarding
@@ -283,7 +284,9 @@ class BotHandlers:
         self.storage = storage
         self.pipeline = pipeline
         summarize = pipeline.summarizer.summarize_many if pipeline is not None else None
-        self.onboarding = Onboarding(settings, storage, summarize=summarize)
+        self.onboarding = Onboarding(
+            settings, storage, summarize=summarize, search=VacancySearch(settings)
+        )
 
     def _is_owner(self, update: Update) -> bool:
         """Владелец и только в личке: в группе ответы (заказы, цены) увидели бы все."""

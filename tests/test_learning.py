@@ -98,7 +98,7 @@ def test_office_lesson_penalizes_only_vacancies_without_remote(make_project, set
     drop = score_project(office, settings, NOW).score - score_project(office, s, NOW).score
     assert abs(drop - 15) <= 1
     assert score_project(remote, s, NOW).score == score_project(remote, settings, NOW).score
-    assert learning.reasons_for(make_project()) == ["topic", "pay", "level"]
+    assert learning.reasons_for(make_project()) == ["topic", "skills", "pay", "level"]
 
 
 def test_company_lesson_excludes_its_vacancies(make_project, settings):
@@ -128,3 +128,68 @@ def test_describe_and_nothing_to_learn_texts():
         "вакансии с зарплатой 60 000 ₽ и ниже не присылаю"
     )
     assert "другую причину" in learning.nothing_to_learn("topic")
+
+
+def test_level_learns_experience_from_description_and_excludes_it(make_project, settings):
+    # в названии уровня нет, а в описании — стаж: раньше «запоминать нечего»
+    hard = "Требования: опыт коммерческой разработки от 3 лет, Python, FastAPI."
+    p = vacancy(make_project, title="Python-разработчик", description=hard)
+    first = learning.learn("level", p, settings, ())
+    assert [(c.kind, c.value, c.weight) for c in first] == [("experience", "", 3)]
+    assert learning.describe(first[0]) == "где нужен опыт от 3 лет и больше — не присылаю"
+    s = replace(settings, lessons=lessons(first))
+    more = vacancy(make_project, title=p.title, external_id="2", description="Опыт от 5 лет.")
+    r = score_project(more, s, NOW)
+    assert r.passed is False
+    assert r.excluded_reason == "нужен опыт от 5 лет: по вашей отметке — не ваш уровень"
+    easy = vacancy(make_project, title=p.title, external_id="3", description="Опыт: 1–3 года.")
+    assert score_project(easy, s, NOW).excluded_reason is None
+    # отметка на «от 2 лет» опускает порог, на «от 5 лет» — не поднимает
+    two = vacancy(make_project, external_id="4", description="Опыт от 2 лет.")
+    assert learning.learn("level", two, settings, lessons(first))[0].weight == 2
+    assert learning.learn("level", more, settings, lessons(first))[0].weight == 3
+
+
+def test_level_learns_title_words_and_experience_together(make_project, settings):
+    p = vacancy(make_project, title="Senior Python developer", description="Опыт от 5 лет.")
+    changes = learning.learn("level", p, settings, ())
+    assert [(c.kind, c.value) for c in changes] == [("level", "senior"), ("experience", "")]
+    plain = vacancy(make_project, title="Python-разработчик", description="Нужен бот.")
+    assert learning.learn("level", plain, settings, ()) == []
+    assert "стажа" in learning.nothing_to_learn("level")
+
+
+def test_skill_terms_skip_profile_generic_links_and_level(make_project, settings):
+    p = vacancy(
+        make_project, title="Python-разработчик (Middle)",
+        description="Python, FastAPI, PostgreSQL, Docker, Kubernetes, Kafka, Go, C++, node.js, "
+        "1C, Git, REST API, английский B2. Резюме: hr@firm.ru, https://t.me/firm_hr",
+    )  # fmt: skip
+    assert learning.skill_terms(p, settings) == [
+        "kubernetes", "kafka", "go", "c++", "node.js", "1с",
+    ]  # fmt: skip
+    # «go» — не начало «google» из профиля: короткие слова — только целиком
+    go = vacancy(make_project, description="Go, Google Sheets")
+    assert learning.skill_terms(go, settings) == ["go"]
+
+
+def test_skill_lesson_penalizes_text_mentions(make_project, settings):
+    p = vacancy(make_project, title="Backend-разработчик", description="Java, Spring, Python.")
+    first = learning.learn("skills", p, settings, ())
+    assert [(c.kind, c.value, c.weight) for c in first] == [
+        ("skill", "java", -10), ("skill", "spring", -10),
+    ]  # fmt: skip
+    assert learning.describe(first[0]) == "«java» в тексте: −10 к баллу"
+    s = replace(settings, lessons=lessons(first))
+    similar = vacancy(make_project, external_id="2", description="Нужен Java-разработчик.")
+    drop = score_project(similar, settings, NOW).score - score_project(similar, s, NOW).score
+    assert abs(drop - 10) <= 1
+    assert "🧠 Ваши отметки: «java» −10" in score_project(similar, s, NOW).reasons
+    # навык — целым словом: «java» не штрафует JavaScript
+    js = vacancy(make_project, external_id="5", description="Нужен JavaScript-разработчик.")
+    assert score_project(js, s, NOW).score == score_project(js, settings, NOW).score
+    again = learning.learn("skills", p, settings, lessons(first))
+    assert {c.weight for c in again} == {-20}
+    only_profile = vacancy(make_project, description="Python, FastAPI, Docker.")
+    assert learning.learn("skills", only_profile, settings, ()) == []
+    assert "другую причину" in learning.nothing_to_learn("skills")

@@ -1,14 +1,15 @@
 """Анкета публичного бота (ADR 0011): согласие → ФИО → обращение → резюме → профиль →
-направления → площадки. Состояние — строка users в SQLite (Storage.save_user), поэтому
-анкета переживает перезапуск бота.
+направления → площадки → другие города и удалёнка (если выбраны вакансии) → частота.
+Состояние — строка users в SQLite (Storage.save_user), поэтому анкета переживает перезапуск.
 
 Шаги (User.step): consent, name, address, address_custom, resume, analyzing, review,
-experience_custom, directions, platforms, frequency, frequency_custom, done. Частоту можно
-сменить и после анкеты (кнопка «Частота» в /start), тогда в data стоит editing. Кнопки анкеты —
+experience_custom, directions, platforms, location, frequency, frequency_custom, done. Частоту
+и города можно сменить и после анкеты (кнопки в /start), тогда в data стоит editing. Кнопки анкеты —
 callback_data «ob:<действие>[:<значение>]».
-Сразу после анкеты присылаются первые заказы под неё из уже собранных (first_matches) —
+Сразу после анкеты присылаются первые заказы и вакансии под неё (first_matches): из уже
+собранных и живым поиском SuperJob по профессии и городу из резюме (matching.py, ADR 0014) —
 видно, что поиск работает; полный список — кнопка «Заказы по анкете» в /start. Рассылка по
-расписанию — следующий этап.
+расписанию — следующий этап. Не разработчику IT-направления и биржи фриланса не предлагаются.
 """
 
 from __future__ import annotations
@@ -26,6 +27,15 @@ from telegram import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOpti
 from telegram.constants import ChatAction, ParseMode
 
 from freelance_bot.config import Settings
+from freelance_bot.matching import (
+    OTHER_CITIES,
+    REMOTE,
+    location_choice,
+    mismatch,
+    rank,
+    resume_profile,
+    user_settings,
+)
 from freelance_bot.models import Project, ScoreResult, User
 from freelance_bot.resume import (
     FORMATS_HINT,
@@ -55,6 +65,7 @@ PREFIX = "ob:"
 MAX_ANALYSES_PER_DAY = 5  # каждый разбор — запрос к нейросети с общим лимитом
 MIN_PASTED_RESUME_CHARS = 300  # короче — это не резюме, а ответ на вопрос
 MAX_FACTS_SHOWN = 6
+MAX_JOBS_SHOWN = 4
 FIRST_MATCHES_LIMIT = 5  # одно сообщение: показать, что поиск работает, а не завалить
 MATCHES_LIMIT = 20  # по кнопке — как /last у владельца
 FIRST_MATCHES_WINDOW = timedelta(days=7)  # как /last: заказы обычно открыты несколько дней
@@ -84,6 +95,7 @@ BUTTON_FREQUENCY = "⏰ Частота уведомлений"
 BUTTON_OWN_SCHEDULE = "✏️ Свой тайминг"
 BUTTON_FORGET = "🗑 Удалить мои данные"
 BUTTON_MATCHES = "🔎 Заказы по анкете"
+BUTTON_LOCATION = "📍 Другие города и удалёнка"
 BUTTON_CANCEL = "Отмена"
 
 DECLINED_TEXT = "Хорошо, ничего не сохраняю. Передумаете — /start."
@@ -114,6 +126,11 @@ DIRECTIONS_EMPTY = "Выберите хотя бы одно направлени
 PLATFORMS_TEXT = "Где искать? Нажмите, чтобы включить или выключить, или «Везде».{hh}"
 HH_NOTE = "\n\nHH.ru — вакансии, а не заказы; как его подключить, расскажу отдельно."
 PLATFORMS_EMPTY = "Выберите хотя бы одну площадку"
+LOCATION_TEXT = (
+    "Вакансия подходит по профессии, но она {where} — присылать такие?\n\n"
+    "✅ — присылаю, ⬜ — отсекаю. Нажмите, чтобы переключить."
+)
+LOCATION_SAVED = "📍 Готово, вакансии: {where}."
 FREQUENCY_TEXT = (
     "Как часто присылать новые заказы и вакансии? Время — {tz}. Если нового нет, молчу."
 )
@@ -132,11 +149,16 @@ DONE_TEXT = (
     "Готово, {address}! Анкета сохранена.\n\n{summary}\n\n"
     "/profile — анкета, /start — заполнить заново, /forget — удалить данные."
 )
-MATCHES_TITLE = "🔎 <b>Заказы под вашу анкету</b> — {count}, свежие сверху"
+MATCHES_TITLE = "🔎 <b>Заказы и вакансии под вашу анкету</b> — {count}"
 MATCHES_HINT = "Поиск работает. Откликнуться — на площадке по ссылке."
 MATCHES_NONE = (
-    "🔎 За неделю подходящих заказов под анкету не нашлось. Попробуйте добавить "
-    "направления или площадки: /start → «Заполнить заново»."
+    "🔎 Подходящих заказов и вакансий под анкету сейчас нет: ищу по профессии, стажу и "
+    "городу из резюме. Можно добавить площадки или прислать другое резюме: /start → "
+    "«Заполнить заново»."
+)
+MATCHES_NONE_CITY = (
+    "🔎 В городе {city} на SuperJob сейчас нет вакансий «{profession}» под ваш стаж. "
+    "Загляну снова, когда появятся."
 )
 MATCHES_LATER = "Новые будут приходить {when} ({tz}), когда включим рассылку, — я напишу."
 FORGET_TEXT = "Удалить анкету и выжимку из резюме? Это нельзя отменить."
@@ -146,6 +168,7 @@ PUBLIC_HELP = "Команды: /start — анкета, /profile — ваши д
 
 Reply = Callable[[str, InlineKeyboardMarkup | None], Awaitable[Any]]
 Summarize = Callable[[Sequence[Project]], Awaitable[list[str]]]
+Search = Callable[[dict[str, Any]], Awaitable[list[Project]]]
 
 
 def consent_text(settings: Settings) -> str:
@@ -244,11 +267,46 @@ def direction_options(settings: Settings) -> list[tuple[str, str]]:
     return [(name, DIRECTION_LABELS.get(name, name)) for name in settings.directions]
 
 
-def platform_options(settings: Settings) -> list[tuple[str, str]]:
+def signup_platforms(data: dict[str, Any], settings: Settings) -> tuple[str, ...]:
+    """Площадки анкеты: не разработчику (профессия из резюме без IT-направлений) биржи
+    фриланса не нужны — там заказы на разработку; только вакансии, если они включены."""
+    live = settings.signup_platforms
+    profile = resume_profile(data)
+    if profile is not None and profile.profession and not data.get("directions"):
+        return tuple(p for p in live if p in VACANCY_PLATFORMS) or live
+    return live
+
+
+def platform_options(
+    settings: Settings, data: dict[str, Any] | None = None
+) -> list[tuple[str, str]]:
     return [
         (p, PLATFORM_NAMES[p] + (" (вакансии)" if p in VACANCY_PLATFORMS else ""))
-        for p in settings.signup_platforms
+        for p in signup_platforms(data or {}, settings)
     ]
+
+
+def asks_location(data: dict[str, Any], settings: Settings) -> bool:
+    """Города и удалёнка — только у вакансий: заказы бирж и так удалённые."""
+    live = settings.signup_platforms
+    return any(p in VACANCY_PLATFORMS and p in live for p in data.get("platforms") or [])
+
+
+def location_options(data: dict[str, Any]) -> list[tuple[str, str]]:
+    """Без города в резюме другие города не отсекаются — спрашивать о них незачем."""
+    resume = resume_profile(data)
+    options = [(REMOTE, "Удалённая работа")]
+    if resume and resume.city:
+        options.insert(0, (OTHER_CITIES, f"Другие города, не только {resume.city}"))
+    return options
+
+
+def describe_location(data: dict[str, Any]) -> str:
+    resume = resume_profile(data)
+    chosen = location_choice(data)
+    city = resume.city if resume and resume.city and OTHER_CITIES not in chosen else ""
+    place = city or "любой город"
+    return f"{place} и удалённые" if REMOTE in chosen else f"{place}, без удалённых"
 
 
 def _years(value: float) -> str:
@@ -259,8 +317,10 @@ def _years(value: float) -> str:
     if not whole:
         return f"{shown} года"
     n = int(value)
-    word = "лет" if 11 <= n % 100 <= 14 else {1: "год", 2: "года", 3: "года", 4: "года"}.get(
-        n % 10, "лет"
+    word = (
+        "лет"
+        if 11 <= n % 100 <= 14
+        else {1: "год", 2: "года", 3: "года", 4: "года"}.get(n % 10, "лет")
     )
     return f"{shown} {word}"
 
@@ -273,11 +333,26 @@ def format_profile(data: dict[str, Any], settings: Settings) -> str:
         lines.append(f"👤 {e(data['full_name'])} — «{e(data.get('address', ''))}»")
     directions = data.get("directions") or []
     labels = ", ".join(DIRECTION_LABELS.get(d, d) for d in directions)
-    lines.append(f"🎯 Направления: {e(labels) or 'не выбраны'}")
+    resume = resume_profile(data)
+    if not labels and resume and resume.profession:
+        lines.append(f"🎯 Ищу: вакансии «{e(resume.profession)}»")
+    else:
+        lines.append(f"🎯 Направления: {e(labels) or 'не выбраны'}")
     profile = data.get("profile")
     if profile:
         p = ResumeProfile.from_dict(profile)
+        if p.profession:
+            lines.append(f"💼 Профессия: {e(p.profession)}")
+        if p.city:
+            lines.append(f"📍 Город: {e(p.city)}")
         lines.append(f"⏳ Стаж: {_years(p.experience_years)}")
+        if p.jobs:
+            jobs = "\n".join(f"  – {e(job)}" for job in p.jobs[:MAX_JOBS_SHOWN])
+            lines.append(f"🏢 Места работы:\n{jobs}")
+        if p.skills:
+            lines.append(f"🧩 Навыки: {e(', '.join(p.skills))}")
+        if p.education:
+            lines.append(f"🎓 Образование: {e('; '.join(p.education))}")
         if p.keywords:
             lines.append(f"🔑 Ключевые слова: {e(', '.join(p.keywords))}")
         if p.facts:
@@ -290,23 +365,12 @@ def format_profile(data: dict[str, Any], settings: Settings) -> str:
         live = settings.signup_platforms  # выбранная, но выключенная площадка не ищется
         names = ", ".join(PLATFORM_NAMES.get(p, p) for p in platforms if p in live)
         lines.append(f"🌐 Площадки: {names or 'не выбраны'}")
+        if data.get("location") is not None and asks_location(data, settings):
+            lines.append(f"📍 Вакансии: {e(describe_location(data))}")
     if data.get("schedule"):
         when = describe(Schedule.from_dict(data["schedule"]))
         lines.append(f"⏰ Присылать: {when} ({tz_label(settings.timezone)})")
     return "\n".join(lines)
-
-
-def user_settings(data: dict[str, Any], settings: Settings) -> Settings:
-    """Настройки отбора под анкету: только её направления и стаж из резюме (без резюме — 0,
-    стаж владельца из settings.toml чужим не подходит)."""
-    chosen = data.get("directions") or []
-    profile = data.get("profile")
-    years = ResumeProfile.from_dict(profile).experience_years if profile else 0.0
-    return replace(
-        settings,
-        directions={k: d for k, d in settings.directions.items() if k in chosen},
-        experience_years=years,
-    )
 
 
 def first_matches(
@@ -318,26 +382,29 @@ def first_matches(
     *,
     include_private: bool = False,
     tg_id: int | None = None,
+    extra: Sequence[Project] = (),
 ) -> list[tuple[Project, ScoreResult]]:
-    """Подходящие анкете заказы из собранных за FIRST_MATCHES_WINDOW: свежие первыми.
-    Балл — на момент публикации, как в /last, чтобы возраст не отсекал открытый заказ.
-    Статусы в базе — владельца (откликнулся, пропустил), поэтому не учитываются.
-    `include_private` — владельцу его же HH."""
+    """Подходящие анкете заказы из собранных за FIRST_MATCHES_WINDOW и вакансии живого
+    поиска `extra`: свежие первыми. Балл — на момент публикации, как в /last, чтобы возраст
+    не отсекал открытый заказ; что резюме не выполняет (стаж, город, профессия) —
+    отсекается (matching.mismatch). Статусы в базе — владельца (откликнулся, пропустил),
+    поэтому не учитываются. `include_private` — владельцу его же HH."""
     own = user_settings(data, settings)
     if tg_id is not None:  # свои отметки «не подходит» (ADR 0013)
         own = replace(own, lessons=tuple(storage.lessons(tg_id)))
     platforms = set(data.get("platforms") or []) & set(settings.signup_platforms)
     if not include_private:
         platforms -= PRIVATE_PLATFORMS
+    candidates: dict[tuple[str, str], Project] = {}
+    for p in [*storage.recent_projects(now - FIRST_MATCHES_WINDOW), *extra]:
+        if p.platform in platforms:
+            candidates.setdefault((p.platform, p.external_id), p)
     items = []
-    for p in storage.recent_projects(now - FIRST_MATCHES_WINDOW):
-        if p.platform not in platforms:
-            continue
+    for p in candidates.values():
         result = score_project(p, own, p.published_at)
-        if result.passed:
+        if result.passed and mismatch(p, data, own) is None:
             items.append((p, result))
-    items.sort(key=lambda item: (item[0].published_at, item[1].score), reverse=True)
-    return items[:limit]
+    return rank(items, data)[:limit]
 
 
 def matches_pages(
@@ -393,12 +460,14 @@ class Onboarding:
         llm_client: Any = None,
         spawn: Callable[[Coroutine[Any, Any, Any]], Any] | None = None,
         summarize: Summarize | None = None,
+        search: Search | None = None,
     ) -> None:
         self.settings = settings
         self.storage = storage
         self.llm_client = llm_client
         self.spawn = spawn
         self.summarize = summarize  # суть заказа (📝) с кэшем; нет — список без неё
+        self.search = search  # живой поиск вакансий под анкету (matching.VacancySearch)
 
     def in_progress(self, tg_id: int) -> bool:
         """Анкета начата и не закончена — сообщения пользователя идут в неё."""
@@ -415,17 +484,15 @@ class Onboarding:
             self.storage.save_user(tg_id, "consent", {})
             await reply(consent_text(self.settings), consent_markup())
         elif user.step == "done" and not restart:
-            await reply(
-                format_profile(user.data, self.settings),
-                _markup(
-                    [
-                        [_button(BUTTON_MATCHES, "matches")],
-                        [_button(BUTTON_FREQUENCY, "freq_edit")],
-                        [_button(BUTTON_RESTART, "restart")],
-                        [_button(BUTTON_FORGET, "forget")],
-                    ]
-                ),
-            )
+            rows = [[_button(BUTTON_MATCHES, "matches")]]
+            if asks_location(user.data, self.settings):
+                rows.append([_button(BUTTON_LOCATION, "loc_edit")])
+            rows += [
+                [_button(BUTTON_FREQUENCY, "freq_edit")],
+                [_button(BUTTON_RESTART, "restart")],
+                [_button(BUTTON_FORGET, "forget")],
+            ]
+            await reply(format_profile(user.data, self.settings), _markup(rows))
         elif restart or user.step in ("consent", "done"):
             self.storage.save_user(tg_id, "name", {}, completed=False)
             await reply(NAME_TEXT, None)
@@ -506,8 +573,10 @@ class Onboarding:
         if user.step == "analyzing":
             return await reply(RESUME_BUSY, None)
         if user.step != "resume" or document is None:
-            return await self._prompt(user, reply) if user.step != "done" else await reply(
-                PUBLIC_HELP, None
+            return (
+                await self._prompt(user, reply)
+                if user.step != "done"
+                else await reply(PUBLIC_HELP, None)
             )
         if (document.file_size or 0) > MAX_FILE_BYTES:
             return await reply(f"Файл больше {MAX_FILE_BYTES // 1024 // 1024} МБ.", None)
@@ -556,9 +625,12 @@ class Onboarding:
             ("platforms", "plat"): self._toggle_platform,
             ("platforms", "plat_all"): self._all_platforms,
             ("platforms", "plat_done"): self._platforms_done,
+            ("location", "loc"): self._toggle_location,
+            ("location", "loc_done"): self._location_done,
             ("frequency", "freq"): self._pick_frequency,
             ("frequency", "freq_own"): self._own_frequency,
             ("done", "freq_edit"): self._edit_frequency,
+            ("done", "loc_edit"): self._edit_location,
             ("done", "matches"): self._matches,
         }.get((user.step, action))
         if handler is None:  # старая кнопка с прошлого шага
@@ -599,7 +671,8 @@ class Onboarding:
 
     async def _review_ok(self, user: User, value: str, query: Any, reply: Reply) -> None:
         await query.edit_message_reply_markup(reply_markup=None)
-        if not user.data.get("directions"):
+        resume = resume_profile(user.data)
+        if not user.data.get("directions") and not (resume and resume.profession):
             user = self.storage.save_user(user.tg_id, "directions", user.data)
         else:
             user = self._to_platforms(user)
@@ -628,27 +701,29 @@ class Onboarding:
         await query.edit_message_reply_markup(reply_markup=self._directions_markup(user))
 
     async def _directions_done(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        if not user.data.get("directions"):
+        resume = resume_profile(user.data)
+        if not user.data.get("directions") and not (resume and resume.profession):
             return await query.answer(DIRECTIONS_EMPTY, show_alert=True)
         await query.edit_message_reply_markup(reply_markup=None)
         await self._prompt(self._to_platforms(user), reply)
 
     def _to_platforms(self, user: User) -> User:
-        platforms = user.data.get("platforms")
-        if platforms is None:  # впервые — всё включено, выключить проще, чем искать
-            platforms = list(self.settings.signup_platforms)
+        offered = signup_platforms(user.data, self.settings)
+        platforms = [p for p in user.data.get("platforms") or [] if p in offered]
+        if user.data.get("platforms") is None or not platforms:  # впервые — всё включено,
+            platforms = list(offered)  # выключить проще, чем искать
         data = {**user.data, "platforms": platforms}
         return self.storage.save_user(user.tg_id, "platforms", data)
 
     async def _toggle_platform(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        if value not in self.settings.signup_platforms:
+        if value not in signup_platforms(user.data, self.settings):
             return
         chosen = _toggled(user.data.get("platforms") or [], value)
         user = self.storage.save_user(user.tg_id, "platforms", {**user.data, "platforms": chosen})
         await query.edit_message_reply_markup(reply_markup=self._platforms_markup(user))
 
     async def _all_platforms(self, user: User, value: str, query: Any, reply: Reply) -> None:
-        data = {**user.data, "platforms": list(self.settings.signup_platforms)}
+        data = {**user.data, "platforms": list(signup_platforms(user.data, self.settings))}
         await self._platforms_done(self.storage.save_user(user.tg_id, "platforms", data), value,
                                    query, reply)  # fmt: skip
 
@@ -657,7 +732,36 @@ class Onboarding:
         if not any(p in live for p in user.data.get("platforms") or []):
             return await query.answer(PLATFORMS_EMPTY, show_alert=True)
         await query.edit_message_reply_markup(reply_markup=None)
-        user = self.storage.save_user(user.tg_id, "frequency", user.data)
+        if asks_location(user.data, self.settings):
+            data = {**user.data, "location": list(location_choice(user.data))}
+            user = self.storage.save_user(user.tg_id, "location", data)
+        else:
+            user = self.storage.save_user(user.tg_id, "frequency", user.data)
+        await self._prompt(user, reply)
+
+    async def _toggle_location(self, user: User, value: str, query: Any, reply: Reply) -> None:
+        if value not in dict(location_options(user.data)):
+            return
+        chosen = _toggled(list(location_choice(user.data)), value)
+        user = self.storage.save_user(user.tg_id, "location", {**user.data, "location": chosen})
+        await query.edit_message_reply_markup(reply_markup=self._location_markup(user))
+
+    async def _location_done(self, user: User, value: str, query: Any, reply: Reply) -> None:
+        await query.edit_message_reply_markup(reply_markup=None)
+        data = dict(user.data)
+        if data.pop("editing", False):
+            self.storage.save_user(user.tg_id, "done", data)
+            return await reply(
+                LOCATION_SAVED.format(where=html.escape(describe_location(data))), None
+            )
+        user = self.storage.save_user(user.tg_id, "frequency", data)
+        await self._prompt(user, reply)
+
+    async def _edit_location(self, user: User, value: str, query: Any, reply: Reply) -> None:
+        """Как смена частоты: анкета остаётся пройденной."""
+        await query.edit_message_reply_markup(reply_markup=None)
+        data = {**user.data, "location": list(location_choice(user.data)), "editing": True}
+        user = self.storage.save_user(user.tg_id, "location", data)
         await self._prompt(user, reply)
 
     async def _pick_frequency(self, user: User, value: str, query: Any, reply: Reply) -> None:
@@ -708,13 +812,20 @@ class Onboarding:
         later = MATCHES_LATER.format(
             when=describe(Schedule.from_dict(user.data["schedule"])), tz=tz_label(tz)
         )
+        live: list[Project] = []
+        if self.search is not None:
+            try:
+                live = await self.search(user.data)
+            except Exception as exc:  # SuperJob недоступен — остаются собранные
+                log.warning("вакансии под анкету не найдены: %s", type(exc).__name__)
         try:
             items = first_matches(
                 user.data, self.settings, self.storage, datetime.now(UTC), limit,
                 include_private=user.tg_id == self.settings.owner_id, tg_id=user.tg_id,
+                extra=live,
             )  # fmt: skip
             if not items:
-                return await reply(f"{MATCHES_NONE}\n\n{later}", None)
+                return await reply(f"{self._none_text(user)}\n\n{later}", None)
             projects = [p for p, _ in items]
             summaries = await self.summarize(projects) if self.summarize else None
             pages = matches_pages(items, summaries, tz, reserve=len(later) + 2)
@@ -725,6 +836,16 @@ class Onboarding:
         pages[-1] = f"{pages[-1]}\n\n{later}"
         for text in pages:
             await reply(text, None)
+
+    def _none_text(self, user: User) -> str:
+        """Пусто: не разработчику — что вакансий нет в его городе (SuperJob в небольших
+        городах почти пуст), а не совет добавить направления."""
+        resume = resume_profile(user.data)
+        if resume and resume.profession and resume.city and not user.data.get("directions"):
+            return MATCHES_NONE_CITY.format(
+                city=html.escape(resume.city), profession=html.escape(resume.profession)
+            )
+        return MATCHES_NONE
 
     # ── резюме ───────────────────────────────────────────────────────────────
 
@@ -795,9 +916,18 @@ class Onboarding:
         elif step == "directions":
             await reply(DIRECTIONS_TEXT, self._directions_markup(user))
         elif step == "platforms":
-            vacancies = any(p in VACANCY_PLATFORMS for p in self.settings.signup_platforms)
+            offered = signup_platforms(data, self.settings)
+            vacancies = any(p in VACANCY_PLATFORMS for p in offered)
             hh = HH_NOTE if vacancies else ""
             await reply(PLATFORMS_TEXT.format(hh=hh), self._platforms_markup(user))
+        elif step == "location":
+            resume = resume_profile(data)
+            where = (
+                f"не в городе {html.escape(resume.city)} или удалённая"
+                if resume and resume.city
+                else "удалённая"
+            )
+            await reply(LOCATION_TEXT.format(where=where), self._location_markup(user))
         elif step == "frequency":
             tz = tz_label(self.settings.timezone)
             await reply(FREQUENCY_TEXT.format(tz=tz), frequency_markup())
@@ -811,9 +941,14 @@ class Onboarding:
             direction_options(self.settings), user.data.get("directions") or [], "dir"
         )
 
+    def _location_markup(self, user: User) -> InlineKeyboardMarkup:
+        return toggles_markup(
+            location_options(user.data), list(location_choice(user.data)), "loc"
+        )
+
     def _platforms_markup(self, user: User) -> InlineKeyboardMarkup:
         return toggles_markup(
-            platform_options(self.settings),
+            platform_options(self.settings, user.data),
             user.data.get("platforms") or [],
             "plat",
             [[_button(BUTTON_ALL, "plat_all")]],

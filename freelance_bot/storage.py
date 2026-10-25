@@ -119,6 +119,29 @@ MIGRATIONS: tuple[str, ...] = (
         UNIQUE (tg_id, kind, value)
     );
     """,
+    # Самообучение: «🛠 не мои навыки» (skill) и стаж из описания при «🎓 не мой уровень»
+    # (experience). CHECK в SQLite не меняется — таблица пересобирается, правила переносятся.
+    """
+    CREATE TABLE lessons_new (
+        id              INTEGER PRIMARY KEY AUTOINCREMENT,
+        tg_id           INTEGER NOT NULL,
+        kind            TEXT NOT NULL
+            CHECK (kind IN ('topic', 'level', 'office', 'pay', 'company', 'skill', 'experience')),
+        value           TEXT NOT NULL,
+        weight          INTEGER NOT NULL,
+        hits            INTEGER NOT NULL DEFAULT 1 CHECK (hits > 0),
+        example         TEXT NOT NULL DEFAULT '',
+        created_at      TEXT NOT NULL,
+        updated_at      TEXT NOT NULL,
+        UNIQUE (tg_id, kind, value)
+    );
+    INSERT INTO lessons_new
+        (id, tg_id, kind, value, weight, hits, example, created_at, updated_at)
+        SELECT id, tg_id, kind, value, weight, hits, example, created_at, updated_at
+        FROM lessons;
+    DROP TABLE lessons;
+    ALTER TABLE lessons_new RENAME TO lessons;
+    """,
 )
 
 

@@ -6,13 +6,15 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Literal, get_args
 
-Platform = Literal["fl", "kwork", "work24", "freelance_ru", "workzilla", "hh", "superjob"]
+Platform = Literal[
+    "fl", "kwork", "work24", "freelance_ru", "workzilla", "hh", "superjob", "trudvsem"
+]
 Mode = Literal["notify", "draft", "auto"]
 
 PLATFORMS: tuple[str, ...] = get_args(Platform)
 MODES: tuple[str, ...] = get_args(Mode)
 # Вакансии (HH, SuperJob): карточка без черновика, отклик пользователь делает на сайте
-VACANCY_PLATFORMS = frozenset({"hh", "superjob"})
+VACANCY_PLATFORMS = frozenset({"hh", "superjob", "trudvsem"})
 
 
 @dataclass(frozen=True)
@@ -72,7 +74,7 @@ class User:
     completed_at: datetime | None = None
 
 
-LessonKind = Literal["topic", "level", "office", "pay", "company"]
+LessonKind = Literal["topic", "level", "office", "pay", "company", "skill", "experience"]
 LESSON_KINDS: tuple[str, ...] = get_args(LessonKind)
 
 
@@ -81,8 +83,9 @@ class Lesson:
     """Чему бот научился по отметкам пользователя (learning.py, ADR 0013)."""
 
     id: int
-    kind: LessonKind  # topic/level — слово в названии; office — без удалёнки; pay; company
-    value: str  # слово, название компании, «vacancy»/«order» для pay; у office — ""
-    weight: int  # баллы к оценке (topic, level, office); у pay — порог в рублях включительно
+    kind: LessonKind  # topic/level — слово в названии; skill — в тексте; office; pay; company;
+    # experience — требуемый стаж из описания
+    value: str  # слово, название компании, «vacancy»/«order» для pay; у office и experience — ""
+    weight: int  # баллы (topic, level, skill, office); у pay — порог в рублях; у experience — лет
     hits: int  # сколько раз отмечено
     example: str  # название последнего заказа или вакансии, по которому научился

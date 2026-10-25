@@ -24,7 +24,7 @@ DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_GROQ_MODEL = "openai/gpt-oss-120b"
 DEFAULT_INTERVALS: dict[str, int] = {
     "fl": 180, "kwork": 300, "work24": 600, "freelance_ru": 600, "workzilla": 600, "hh": 600,
-    "superjob": 600, "trudvsem": 600,
+    "superjob": 600, "trudvsem": 600, "tgchannels": 1800,
 }  # fmt: skip
 # Ленты Work24 — имена операций из freelance_bot/sources/work24.json
 WORK24_FEEDS = ("listItOrders", "listOrders")
@@ -74,6 +74,8 @@ class SourceSettings:
     queries: list[str] = field(default_factory=list)
     catalogues: list[int] = field(default_factory=list)
     remote_only: bool = False
+    # Только Telegram-каналы: имя канала → город его вакансий (ADR 0016)
+    channels: dict[str, str] = field(default_factory=dict)
     # Свой срок свежести, ч (вакансии открыты дольше заказов); None — general.max_age_hours
     max_age_hours: float | None = None
 
@@ -319,6 +321,7 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
         chat = _parse_chat(table, platform, prefix)
         categories = _parse_categories(table, platform, prefix)
         queries, catalogues, remote_only = _parse_superjob(table, platform, prefix)
+        channels = _parse_channels(table, platform, prefix)
         sources[platform] = SourceSettings(
             enabled=_bool(table, "enabled", f"{prefix}.enabled", True),
             interval_sec=max(interval, MIN_INTERVAL_SEC),
@@ -333,9 +336,30 @@ def _parse_sources(raw: dict[str, Any]) -> dict[Platform, SourceSettings]:
             queries=queries,
             catalogues=catalogues,
             remote_only=remote_only,
+            channels=channels,
             max_age_hours=_source_max_age(table, prefix),
         )
     return sources
+
+
+def _parse_channels(table: dict[str, Any], platform: str, prefix: str) -> dict[str, str]:
+    if platform != "tgchannels":
+        if "channels" in table:
+            raise ConfigError(
+                f"{prefix}.channels: настройка действует только для sources.tgchannels"
+            )
+        return {}
+    channels = table.get("channels", {})
+    if not isinstance(channels, dict) or not all(
+        isinstance(name, str) and re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{3,31}", name)
+        and isinstance(city, str) and city.strip()
+        for name, city in channels.items()
+    ):  # fmt: skip
+        raise ConfigError(
+            f"{prefix}.channels: нужна таблица «имя канала = город», "
+            'например rabota_perm = "Пермь"'
+        )
+    return {name: city.strip() for name, city in channels.items()}
 
 
 def _source_max_age(table: dict[str, Any], prefix: str) -> float | None:

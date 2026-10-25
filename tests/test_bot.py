@@ -714,7 +714,8 @@ def test_disabled_kwork_runs_only_with_include_disabled(capsys):
     on = {name: replace(settings.sources[name], enabled=True) for name in ("fl", "work24")}
     off = {
         name: replace(settings.sources[name], enabled=False)
-        for name in ("kwork", "freelance_ru", "workzilla", "hh", "superjob", "trudvsem")
+        for name in ("kwork", "freelance_ru", "workzilla", "hh", "superjob", "trudvsem",
+                     "tgchannels")
     }
     settings = replace(settings, sources={**settings.sources, **on, **off})
     assert cli.enabled_platforms(settings, None, include_disabled=False) == ["fl", "work24"]

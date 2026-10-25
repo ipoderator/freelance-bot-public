@@ -32,7 +32,7 @@ interval_min = 60
 enabled = false
 # Площадки в анкете; «Везде» — все из списка. Kwork не предлагаем (решение 2026-10-24:
 # «давай пока без kwork»), Work-zilla — сессия владельца, выключен.
-platforms = ["fl", "freelance_ru", "work24", "hh", "superjob", "trudvsem"]
+platforms = ["fl", "freelance_ru", "work24", "hh", "superjob", "trudvsem", "tgchannels"]
 
 [storage]
 # Файл SQLite: дедупликация, статусы проектов, история откликов.
@@ -200,6 +200,41 @@ interval_sec = 1800
 jitter_sec = 60
 mode = "notify"
 daily_auto_limit = 0
+
+[sources.tgchannels]
+# Telegram-каналы с вакансиями — веб-превью t.me/s/<канал>, без аккаунта (ADR 0016,
+# docs/platforms.md, §9). Условия Telegram сбор запрещают — подключено решением пользователя
+# 2026-10-25 («Веб-превью t.me/s», «Только сеть 18 каналов»), риск на нём. Только под анкету:
+# каналы города из резюме (все — если выбраны другие города); первая страница канала, тексты
+# не уходят нейросети, контакты не копируются.
+enabled = true
+max_age_hours = 72
+interval_sec = 1800
+jitter_sec = 60
+mode = "notify"
+daily_auto_limit = 0
+
+[sources.tgchannels.channels]
+# Имя канала = город его вакансий. Новый канал — только того же формата: «Должность»,
+# зарплата, «Обязанности:», «Требования:», «Контакты:» (проверено 2026-10-25).
+rabota_moskva = "Москва"
+vakansii_moskva = "Москва"
+rabota_spb = "Санкт-Петербург"
+vakansii_spb = "Санкт-Петербург"
+rabota_piter = "Санкт-Петербург"
+vakansii_kazan = "Казань"
+rabota_krasnodar = "Краснодар"
+rabota_rostov = "Ростов-на-Дону"
+vakansii_samara = "Самара"
+rabota_ufa = "Уфа"
+vakansii_ufa = "Уфа"
+rabota_perm = "Пермь"
+vakansii_perm = "Пермь"
+rabota_tyumen = "Тюмень"
+rabota_omsk = "Омск"
+vakansii_omsk = "Омск"
+vakansii_sochi = "Сочи"
+vakansii_smolensk = "Смоленск"
 
 [kwork]
 # Сколько коннектов Kwork бот может потратить за сутки. 0 — ни одного:

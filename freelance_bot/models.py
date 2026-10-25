@@ -7,14 +7,16 @@ from datetime import datetime
 from typing import Any, Literal, get_args
 
 Platform = Literal[
-    "fl", "kwork", "work24", "freelance_ru", "workzilla", "hh", "superjob", "trudvsem"
+    "fl", "kwork", "work24", "freelance_ru", "workzilla", "hh", "superjob", "trudvsem",
+    "tgchannels",
 ]
 Mode = Literal["notify", "draft", "auto"]
 
 PLATFORMS: tuple[str, ...] = get_args(Platform)
 MODES: tuple[str, ...] = get_args(Mode)
-# Вакансии (HH, SuperJob): карточка без черновика, отклик пользователь делает на сайте
-VACANCY_PLATFORMS = frozenset({"hh", "superjob", "trudvsem"})
+# Вакансии (HH, SuperJob, «Работа России», Telegram-каналы): карточка без черновика, отклик
+# пользователь делает на сайте
+VACANCY_PLATFORMS = frozenset({"hh", "superjob", "trudvsem", "tgchannels"})
 
 
 @dataclass(frozen=True)
@@ -22,7 +24,7 @@ class Project:
     platform: Platform
     external_id: str  # FL: число из URL /projects/<id>/; Kwork: wants.id; Work24: id заказа;
     # Freelance.ru: число из /task/view/<id>; Work-zilla: id задания; HH: vacancy_key;
-    # SuperJob: id вакансии
+    # SuperJob: id вакансии; Telegram-каналы: хэш названия и описания поста
     url: str
     title: str
     description: str  # полный или обрезанный текст ТЗ

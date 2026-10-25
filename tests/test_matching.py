@@ -308,3 +308,32 @@ async def test_anketa_source_searches_only_its_platform(settings):
     assert await AnketaVacancies("trudvsem", search, lambda: None).fetch() == []
     await AnketaVacancies("trudvsem", search, lambda: anketa).fetch()
     assert asked == ["trudvsem"]
+
+
+class ChannelFetcher(FakeFetcher):
+    """t.me/s/<канал> — снятая страница канала Перми."""
+
+    async def get_text(self, url, headers=None, expect=None):
+        self.urls.append(url)
+        return (ROOT / "tests" / "fixtures" / "tgchannels_rabota_perm.html").read_text()
+
+
+async def test_search_reads_channels_of_own_city(settings):
+    """Telegram-каналы (ADR 0016): по словам не ищут — читаются каналы города из резюме."""
+    fetcher = ChannelFetcher([])
+    search = VacancySearch(settings, fetcher_factory=lambda: fetcher, clock=lambda: NOW)
+    data = _data("02_sales_assistant", settings, platforms=["tgchannels"], location=[])
+    data["profile"]["city"] = "Пермь"
+    found = await search(data)
+    assert fetcher.urls == ["https://t.me/s/rabota_perm", "https://t.me/s/vakansii_perm"]
+    own = user_settings(data, settings)
+    kept = [p.title for p in found if mismatch(p, data, own) is None]
+    assert kept == ["Продавец-консультант в зоомагазин"]  # повар и торговый — не по профессии
+    await search(data)
+    assert len(fetcher.urls) == 2  # повторно — из кэша
+
+    fetcher.urls.clear()
+    data["profile"]["city"] = "Воронеж"  # в Воронеже канала нет
+    assert await search(data) == [] and fetcher.urls == []
+    await search({**data, "location": ["other"]})  # другие города — все каналы
+    assert len(fetcher.urls) == len(settings.sources["tgchannels"].channels)

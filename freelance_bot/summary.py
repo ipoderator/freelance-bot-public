@@ -21,13 +21,13 @@ from freelance_bot.drafting import (
     llm_error,
     make_llm_client,
 )
-from freelance_bot.models import Project
+from freelance_bot.models import VACANCY_PLATFORMS, Project
 
 log = logging.getLogger(__name__)
 
-# Вакансии HH и SuperJob: описание начинается с «Обязанности: …» — нейросеть не зовём, лимит
-# Groq остаётся заказам
-BUILTIN_ONLY = frozenset({"hh", "superjob", "trudvsem"})
+# Вакансии: описание начинается с «Обязанности: …» — нейросеть не зовём, лимит Groq остаётся
+# заказам; посты Telegram-каналов ей и нельзя отдавать — условия Telegram (ADR 0016)
+BUILTIN_ONLY = VACANCY_PLATFORMS
 SUMMARY_MAX_CHARS = 200  # /last: 10 заказов с сутью должны влезть в одно сообщение (4096)
 LLM_SUMMARY_MAX_TOKENS = 4000  # с запасом на adaptive thinking (на 5.5 его не выключить)
 

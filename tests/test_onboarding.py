@@ -223,7 +223,9 @@ async def test_full_flow_with_pasted_resume(env):
     assert user.data["schedule"] == {"every_min": 60, "start_hour": 9, "end_hour": 21}
     assert user.step == "done" and user.completed_at is not None
     assert user.data["full_name"] == "Петров Пётр Петрович"
-    assert user.data["platforms"] == ["fl", "freelance_ru", "work24", "superjob", "trudvsem"]
+    assert user.data["platforms"] == [
+        "fl", "freelance_ru", "work24", "superjob", "trudvsem", "tgchannels"
+    ]
     assert "Петров Пётр Петрович" in env.storage.users()[0].data["full_name"]
     assert len(replies) == 2 and replies[1].startswith(MATCHES_NONE)  # база пуста
     assert "Новые будут приходить раз в час, 9:00–21:00 (МСК)" in replies[1]
@@ -649,8 +651,8 @@ async def test_cook_resume_gets_cook_vacancies_in_own_city(env):
     replies = await chat.press("ob:ok")  # без шага IT-направлений
     assert "Где искать?" in replies[0]
     plats = [d for _, d in chat.buttons()]  # только вакансии: биржи — заказы на разработку
-    assert plats == ["ob:plat:hh", "ob:plat:superjob", "ob:plat:trudvsem", "ob:plat_all",
-                     "ob:plat_done"]
+    assert plats == ["ob:plat:hh", "ob:plat:superjob", "ob:plat:trudvsem", "ob:plat:tgchannels",
+                     "ob:plat_all", "ob:plat_done"]
     await chat.press("ob:plat_done")
     await chat.press("ob:loc_done")
     replies = await chat.press("ob:freq:hourly")

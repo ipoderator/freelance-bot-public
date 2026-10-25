@@ -28,6 +28,7 @@ from freelance_bot.scoring import DIRECTION_LABELS
 PLATFORM_NAMES: dict[str, str] = {
     "fl": "FL.ru", "kwork": "Kwork", "work24": "Work24", "freelance_ru": "Freelance.ru",
     "workzilla": "Work-zilla", "hh": "HH.ru", "superjob": "SuperJob", "trudvsem": "Работа России",
+    "tgchannels": "Telegram-каналы",
 }  # fmt: skip
 KWORK_TERMS_URL = "https://kwork.ru/terms_of_service"
 KWORK_WARNING = (

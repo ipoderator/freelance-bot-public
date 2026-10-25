@@ -148,7 +148,8 @@ def build_sources(
     storage: Storage | None = None,
 ) -> list[Source]:
     """`storage` — чтобы Work24 и Freelance.ru не открывали карточки, которые уже есть в базе,
-    и чтобы вакансии SuperJob и «Работы России» искались под пройденную анкету владельца."""
+    и чтобы вакансии SuperJob, «Работы России» и Telegram-каналов искались под пройденную
+    анкету владельца."""
     fetcher = Fetcher()
     _fetchers.append(fetcher)
     sources: list[Source] = []
@@ -193,8 +194,8 @@ def build_sources(
                 )  # fmt: skip
             )
             sources.append(AnketaVacancies("superjob", search, anketa))
-        elif name == "trudvsem":  # своих слов поиска у владельца нет — только под анкету
-            sources.append(AnketaVacancies("trudvsem", search, anketa))
+        elif name in ("trudvsem", "tgchannels"):  # своих слов поиска нет — только под анкету
+            sources.append(AnketaVacancies(name, search, anketa))
         elif name == "workzilla":
             own = Fetcher()  # cookie сессии не попадают в общий клиент других площадок
             _fetchers.append(own)

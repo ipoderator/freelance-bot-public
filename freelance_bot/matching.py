@@ -3,7 +3,8 @@
 Направления settings.toml — профиль владельца-разработчика; повару или курьеру они не
 подходят, а собранные вакансии SuperJob — только по словам владельца. Поэтому под анкету:
 - вакансии SuperJob и «Работы России» ищутся живым запросом по профессии и прошлым
-  должностям из резюме в городе человека (`VacancySearch`); у владельца с пройденной
+  должностям из резюме в городе человека, Telegram-каналы читаются каналы его города
+  (`VacancySearch`); у владельца с пройденной
   анкетой — ещё и при каждом сборе (`AnketaVacancies`), меню и дайджест — по анкете;
 - профессия и навыки из резюме — направления отбора (`user_settings`);
 - то, что резюме не выполняет, отсекается (`mismatch`): требуемый стаж больше, чем в
@@ -29,6 +30,7 @@ from freelance_bot.models import VACANCY_PLATFORMS, Platform, Project, ScoreResu
 from freelance_bot.resume import IT_ROLE_TERMS, ResumeProfile
 from freelance_bot.scoring import MILITARY_KEY, WEAK_TERMS, experience_limit
 from freelance_bot.sources.superjob import SuperJobSource
+from freelance_bot.sources.tgchannels import TgChannelsSource
 from freelance_bot.sources.trudvsem import MAX_PAGES as TRUDVSEM_PAGES
 from freelance_bot.sources.trudvsem import TrudvsemSource
 from freelance_bot.textmatch import find_terms
@@ -41,7 +43,8 @@ SKILLS_WEIGHT = 0.5  # навыки подтверждают профессию,
 VACANCY_WINDOW = timedelta(days=14)  # вакансии открыты дольше заказов
 MAX_QUERIES = 3  # запросов к API на анкету: профессия и прошлые должности
 SEARCH_PAGES = 1  # SuperJob: по 40 вакансий на запрос — свежие сверху
-SEARCH_PLATFORMS: tuple[Platform, ...] = ("superjob", "trudvsem")  # живой поиск под анкету
+# живой поиск под анкету
+SEARCH_PLATFORMS: tuple[Platform, ...] = ("superjob", "trudvsem", "tgchannels")
 # «Работа России»: запрос ~5 с, а текстовый поиск широкий («продавец-консультант» находит
 # всех продавцов) — хватает двух слов
 TRUDVSEM_QUERIES = 2
@@ -276,11 +279,14 @@ class VacancySearch:
         self._cache: dict[tuple[Any, ...], tuple[float, list[Project]]] = {}
 
     def available(self, platforms: list[Platform]) -> list[Platform]:
-        """Площадки поиска из `platforms`, которые включены (SuperJob — ещё и с ключом)."""
+        """Площадки поиска из `platforms`, которые включены (SuperJob — ещё и с ключом,
+        Telegram-каналы — со списком каналов)."""
         result: list[Platform] = []
         for platform in SEARCH_PLATFORMS:
             source = self.settings.sources.get(platform)
             keyed = platform != "superjob" or bool(self.settings.superjob_api_key)
+            if platform == "tgchannels":
+                keyed = source is not None and bool(source.channels)
             if platform in platforms and source is not None and source.enabled and keyed:
                 result.append(platform)
         return result
@@ -318,6 +324,8 @@ class VacancySearch:
         self, platform: Platform, profile: ResumeProfile, queries: list[str],
         chosen: tuple[str, ...],
     ) -> list[Project]:  # fmt: skip
+        if platform == "tgchannels":
+            return await self._channels(profile, chosen)
         # свой город; выбраны в анкете — ещё другие города и удалённые по всей стране
         city = profile.city or None
         variants: list[tuple[str | None, bool]] = [(city, False)]
@@ -349,6 +357,26 @@ class VacancySearch:
                         max_pages=TRUDVSEM_PAGES if town else 1, clock=self._clock,
                     )  # fmt: skip
                 found += await source.fetch()
+        self._cache[key] = (time.monotonic(), found)
+        return found
+
+    async def _channels(self, profile: ResumeProfile, chosen: tuple[str, ...]) -> list[Project]:
+        """Каналы не ищут по словам: читаются каналы города из резюме; все — если выбраны
+        другие города или города в резюме нет. Профессию отберёт `mismatch`."""
+        channels = self.settings.sources["tgchannels"].channels
+        city = (profile.city or "").casefold()
+        if city and OTHER_CITIES not in chosen:
+            channels = {name: c for name, c in channels.items() if city in c.casefold()}
+        if not channels:
+            return []
+        key = ("tgchannels", *sorted(channels))
+        cached = self._cache.get(key)
+        if cached and time.monotonic() - cached[0] < CACHE_SEC:
+            return cached[1]
+        hours = VACANCY_WINDOW.total_seconds() / 3600
+        async with self._fetcher_factory() as fetcher:
+            source = TgChannelsSource(fetcher, channels, max_age_hours=hours, clock=self._clock)
+            found = await source.fetch()
         self._cache[key] = (time.monotonic(), found)
         return found
 

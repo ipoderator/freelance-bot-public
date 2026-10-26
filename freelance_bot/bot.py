@@ -38,6 +38,7 @@ from telegram.ext import (
     filters,
 )
 
+from freelance_bot import guide
 from freelance_bot.config import Settings
 from freelance_bot.cover_letter import (
     Applicant,
@@ -68,6 +69,7 @@ from freelance_bot.telegram_ui import (
     DIGEST_TITLE,
     MAX_MESSAGE_LEN,
     MENU_ALL,
+    MENU_HELP,
     MENU_LEARNED,
     MENU_LEGACY,
     MENU_NEW,
@@ -106,6 +108,7 @@ log = logging.getLogger(__name__)
 COMMANDS: list[tuple[str, str]] = [
     ("start", "Анкета: заполнить или посмотреть"),
     ("menu", "Меню: новые и все предложения, статистика, состояние бота"),
+    ("help", "Как пользоваться: кнопки и команды"),
     ("status", "Работает ли бот, последний сбор, ошибки"),
     ("pause", "Поставить сбор и уведомления на паузу"),
     ("resume", "Снять паузу"),
@@ -118,7 +121,8 @@ COMMANDS: list[tuple[str, str]] = [
 ]
 # Меню посторонних в публичном режиме (ADR 0011)
 PUBLIC_COMMANDS: list[tuple[str, str]] = [
-    ("start", "Анкета: заполнить или посмотреть"),
+    ("start", "Анкета и подборка вакансий"),
+    ("help", "Как пользоваться ботом"),
     ("profile", "Ваши данные"),
     ("learned", "Чему бот научился по вашим отметкам"),
     ("forget", "Удалить мои данные"),
@@ -146,7 +150,7 @@ NOFIT_TITLE_MAX = 60
 LETTER_NAME_NOTE = (
     "⚠ Подпись — ФИО из анкеты, а в резюме — «{name}». Проверьте письмо перед отправкой."
 )
-MENU_VERSION = "3"  # новое меню — новая версия: бот один раз пришлёт его сам после запуска
+MENU_VERSION = "4"  # новое меню — новая версия: бот один раз пришлёт его сам после запуска
 MENU_MARKUP = ReplyKeyboardMarkup(
     [list(row) for row in MENU_ROWS], resize_keyboard=True, is_persistent=True
 )
@@ -370,6 +374,30 @@ class BotHandlers:
             return await self._deny(update)
         await self._reply(update, self._start_text(), MENU_MARKUP)
 
+    async def help_(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+        """/help и «❓ Помощь»: оглавление справки, разделы — кнопками (guide.py)."""
+        public = self._is_public(update)
+        if not (public or self._is_owner(update)):
+            return await self._deny(update)
+        await self._reply(update, guide.intro(public), _markup(guide.keyboard(public)))
+
+    async def _help_button(self, update: Update) -> None:
+        """Раздел справки на месте оглавления; кнопка устарела — снова оглавление."""
+        query = update.callback_query
+        public = self._is_public(update)
+        key = (query.data or "").removeprefix(guide.PREFIX)
+        commands = PUBLIC_COMMANDS if public else COMMANDS
+        text = guide.topic_text(public, key, commands, self.digest_when())
+        await query.answer()
+        if text is None:
+            key, text = "", guide.intro(public)
+        await query.edit_message_text(
+            text,
+            parse_mode=ParseMode.HTML,
+            reply_markup=_markup(guide.keyboard(public, key)),
+            link_preview_options=LinkPreviewOptions(is_disabled=True),
+        )
+
     async def signup(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Анкета глазами нового пользователя; профиль владельца (profile.toml) не меняется."""
         if not self._is_owner(update):
@@ -583,6 +611,7 @@ class BotHandlers:
             MENU_STATS: self.stats,
             MENU_STATUS: self.status,
             MENU_LEARNED: self.learned,
+            MENU_HELP: self.help_,
         }.get(MENU_LEGACY.get(label, label))
         if menu is not None:
             return await menu(update, context)
@@ -725,6 +754,8 @@ class BotHandlers:
 
     async def button(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         data = getattr(update.callback_query, "data", None) or ""
+        if data.startswith(guide.PREFIX) and (self._is_public(update) or self._is_owner(update)):
+            return await self._help_button(update)
         if data.startswith(ONBOARDING_PREFIX) and (
             self._is_public(update) or self._is_owner(update)
         ):
@@ -889,6 +920,7 @@ def build_application(settings: Settings, storage: Storage, pipeline: Pipeline) 
 
     async def post_init(app: Application) -> None:
         await _register_commands(app, settings)
+        await _register_description(app, settings)
         await handlers.announce_menu(app.bot)
 
     app = Application.builder().token(settings.telegram_token).post_init(post_init).build()
@@ -896,6 +928,7 @@ def build_application(settings: Settings, storage: Storage, pipeline: Pipeline) 
     for name, callback in (
         ("start", handlers.start),
         ("menu", handlers.menu),
+        ("help", handlers.help_),
         ("status", handlers.status),
         ("pause", handlers.pause),
         ("resume", handlers.resume),
@@ -961,6 +994,21 @@ def _make_job(pipeline: Pipeline, platform: Any, jitter_sec: int):
         )
 
     return job
+
+
+async def _register_description(app: Application, settings: Settings | None = None) -> None:
+    """Описание бота (видно в пустом чате до «Старт») и короткое — в профиле. Меняются, только
+    если текст другой: частоту этих вызовов Telegram сильно ограничивает."""
+    public = settings is not None and settings.public_enabled
+    wanted = guide.description(public)
+    try:
+        if (await app.bot.get_my_description()).description != wanted:
+            await app.bot.set_my_description(wanted)
+        short = (await app.bot.get_my_short_description()).short_description
+        if short != guide.SHORT_DESCRIPTION:
+            await app.bot.set_my_short_description(guide.SHORT_DESCRIPTION)
+    except Exception as exc:  # описание — удобство, запуск из-за него не падает
+        log.warning("не удалось обновить описание бота: %s", type(exc).__name__)
 
 
 async def _register_commands(app: Application, settings: Settings | None = None) -> None:

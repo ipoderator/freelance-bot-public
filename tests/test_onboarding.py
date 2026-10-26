@@ -72,6 +72,7 @@ class Query:
         self.message = message
         self.alerts: list[str] = []
         self.markup = "unchanged"
+        self.edited: list[str] = []
 
     async def answer(self, text=None, show_alert=False):
         if show_alert:
@@ -79,6 +80,10 @@ class Query:
 
     async def edit_message_reply_markup(self, reply_markup=None):
         self.markup = reply_markup
+
+    async def edit_message_text(self, text, **kwargs):
+        self.edited.append(text)
+        self.markup = kwargs.get("reply_markup")
 
 
 class Chat:
@@ -107,7 +112,7 @@ class Chat:
 
     async def command(self, name):
         message = Message(f"/{name}")
-        handler = getattr(self.h, name if name != "filters" else "filters_")
+        handler = getattr(self.h, name + "_" if name in ("filters", "help") else name)
         await handler(self._update(message), None)
         self._collect(message)
         return message.replies
@@ -527,6 +532,7 @@ async def test_restart_and_forget(env):
         "ob:freq_edit",
         "ob:restart",
         "ob:forget",
+        "help:intro",
     ]
     assert await chat.say("что дальше?") == [PUBLIC_HELP]
 
@@ -546,6 +552,22 @@ async def test_restart_and_forget(env):
     assert await chat.press("ob:forget_yes") == [FORGOTTEN_TEXT]
     assert env.storage.get_user(GUEST) is None
     assert await chat.command("profile") == ["О вас ничего не сохранено. Начать — /start."]
+
+
+async def test_public_help_is_about_anketa_not_owner_menu(env):
+    chat = Chat(env.handlers, GUEST)
+    replies = await chat.command("help")
+    assert "Как пользоваться ботом" in replies[0]
+    assert [d for _, d in chat.buttons()] == [
+        "help:start", "help:list", "help:learning", "help:anketa", "help:commands",
+    ]
+    await chat.press("help:commands")
+    page = chat.last_query.edited[-1]
+    assert "/forget — Удалить мои данные" in page and "/stats" not in page
+    await chat.press("help:list")
+    assert "✅ Откликнулся" in chat.last_query.edited[-1]
+    await chat.press("help:orders")  # раздел владельца постороннему не открывается
+    assert "Выберите тему" in chat.last_query.edited[-1]
 
 
 async def test_owner_commands_are_closed_for_public_users(env):

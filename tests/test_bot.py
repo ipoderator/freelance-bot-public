@@ -21,6 +21,7 @@ from freelance_bot.bot import (
     TelegramNotifier,
     _make_digest_job,
     _register_commands,
+    _register_description,
     build_application,
     next_digest_at,
     parse_offer,
@@ -208,6 +209,80 @@ async def test_stats_reset_asks_first_then_counts_from_reset(env, make_project):
     update, message, _ = update_from(OWNER)
     await env.handlers.stats(update, None)
     assert "📨 прислано: <b>1</b> / 1" in message.replies[0]
+
+
+async def test_help_shows_contents_and_topics_in_place(env):
+    update, message, _ = update_from(OWNER)
+    await env.handlers.help_(update, None)
+    assert "Как пользоваться ботом" in message.replies[0]
+    topics = [b.callback_data for row in message.markups[0].inline_keyboard for b in row]
+    assert topics == [
+        "help:start", "help:menu", "help:orders", "help:vacancies", "help:learning",
+        "help:schedule", "help:commands",
+    ]
+
+    update, _, query = update_from(OWNER, "help:orders")
+    await env.handlers.button(update, None)
+    assert "Заказ с биржи" in query.edited[-1] and "💬 Цена и срок" in query.edited[-1]
+    pages = [b.callback_data for row in query.edited_markup.inline_keyboard for b in row]
+    assert "help:orders" not in pages and pages[-1] == "help:intro"
+
+    update, _, query = update_from(OWNER, "help:commands")
+    await env.handlers.button(update, None)
+    assert "/stats — Статистика за сегодня и 7 дней" in query.edited[-1]
+
+    update, _, query = update_from(OWNER, "help:schedule")
+    await env.handlers.button(update, None)
+    assert "присылаю списком раз в час" in query.edited[-1]
+
+    update, _, query = update_from(OWNER, "help:gone")  # кнопка старой справки
+    await env.handlers.button(update, None)
+    assert "Выберите тему" in query.edited[-1]
+
+    update, message, _ = update_from(9999)  # посторонний при закрытом боте
+    await env.handlers.help_(update, None)
+    assert message.replies == ["Этот бот личный. Доступ закрыт."]
+
+
+async def test_register_description_sets_only_changed_text(caplog):
+    from freelance_bot import guide
+
+    class Bot:
+        def __init__(self, description="", short=""):
+            self.description, self.short, self.calls = description, short, []
+
+        async def get_my_description(self):
+            return SimpleNamespace(description=self.description)
+
+        async def get_my_short_description(self):
+            return SimpleNamespace(short_description=self.short)
+
+        async def set_my_description(self, text):
+            self.calls.append("description")
+            self.description = text
+
+        async def set_my_short_description(self, text):
+            self.calls.append("short")
+            self.short = text
+
+    bot = Bot()
+    await _register_description(SimpleNamespace(bot=bot))
+    assert bot.calls == ["description", "short"]
+    assert bot.description.endswith("работает только у владельца.")  # без публичного режима
+    assert bot.short == guide.SHORT_DESCRIPTION
+    await _register_description(SimpleNamespace(bot=bot))
+    assert bot.calls == ["description", "short"]  # тот же текст — Telegram не дёргаем
+
+    settings = SimpleNamespace(public_enabled=True)
+    await _register_description(SimpleNamespace(bot=bot), settings)
+    assert bot.description == guide.DESCRIPTION
+
+    class BrokenBot:
+        async def get_my_description(self):
+            raise RuntimeError("сеть")
+
+    await _register_description(SimpleNamespace(bot=BrokenBot()))
+    assert "не удалось обновить описание бота" in caplog.text
 
 
 async def test_status_shows_last_ok(env):
@@ -475,13 +550,14 @@ async def test_menu_buttons_and_menu_command_show_persistent_keyboard(env):
     keyboard = message.markups[0].keyboard
     assert [[b.text for b in row] for row in keyboard] == [
         ["🆕 Новые предложения"], ["📋 Все предложения"],
-        ["📊 Статистика", "⚙️ Состояние бота"], ["🧠 Чему я научился"],
+        ["📊 Статистика", "⚙️ Состояние бота"], ["🧠 Чему я научился", "❓ Помощь"],
     ]
     for label, expected in (("📋 Все предложения", "Подходящие предложения"),
                             ("📊 Статистика", "Сегодня"), ("⚙️ Состояние бота", "Состояние бота"),
                             # прежние подписи: клавиатура у владельца ещё старая
                             ("📋 Все заказы", "Подходящие предложения"),
-                            ("⚙️ Статус", "Состояние бота"), ("🧠 Обучение", "Чему я научился")):
+                            ("⚙️ Статус", "Состояние бота"), ("🧠 Обучение", "Чему я научился"),
+                            ("❓ Помощь", "Как пользоваться ботом")):
         update, message, _ = update_from(OWNER, text=label)
         await env.handlers.text(update, None)
         assert expected in message.replies[0], label
@@ -676,7 +752,7 @@ async def test_setup_telegram_registers_commands_and_prints_user_id():
     text = "\n".join(out)
     assert code == 0
     assert [c for c, _ in bot.commands] == [
-        "start", "menu", "status", "pause", "resume", "filters", "stats", "last", "new",
+        "start", "menu", "help", "status", "pause", "resume", "filters", "stats", "last", "new",
         "learned", "signup",
     ]
     assert "@my_freelance_bot" in text

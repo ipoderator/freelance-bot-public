@@ -171,7 +171,8 @@ FREQUENCY_ERROR = (
 FREQUENCY_SAVED = "⏰ Готово, буду присылать {when} ({tz})."
 DONE_TEXT = (
     "Готово, {address}! Анкета сохранена.\n\n{summary}\n\n"
-    "/profile — анкета, /start — заполнить заново, /forget — удалить данные."
+    "/start — подборка и настройки, /profile — анкета, /help — как пользоваться, /forget — "
+    "удалить данные."
 )
 MATCHES_TITLE = "🔎 <b>Заказы и вакансии под вашу анкету</b> — {count}"
 MATCHES_HINT = (
@@ -211,9 +212,10 @@ FORGET_TEXT = "Удалить анкету и выжимку из резюме? 
 FORGOTTEN_TEXT = "Удалил всё, что знал о вас. Вернуться — /start."
 NOTHING_TEXT = "О вас ничего не сохранено. Начать — /start."
 PUBLIC_HELP = (
-    "Команды: /start — анкета, /profile — ваши данные, /learned — чему я научился по вашим "
-    "отметкам, /forget — удалить данные."
+    "Я понимаю кнопки и команды: /start — анкета и подборка, /help — как пользоваться, "
+    "/profile — ваши данные, /learned — чему я научился, /forget — удалить данные."
 )
+BUTTON_HELP = "❓ Как пользоваться"
 
 Reply = Callable[[str, InlineKeyboardMarkup | None], Awaitable[Any]]
 Summarize = Callable[[Sequence[Project]], Awaitable[list[str]]]
@@ -233,8 +235,13 @@ def consent_text(settings: Settings) -> str:
         llm = ""
     sent = f" Текст резюме для разбора отправляется нейросети ({llm})." if llm else ""
     return (
-        "👋 Я ищу свежие вакансии и заказы на фриланс-биржах под ваш профиль.\n\n"
-        "Для этого спрошу <b>ФИО</b>, <b>как к вам обращаться</b> и попрошу <b>резюме</b>. "
+        "👋 <b>Я подбираю работу под ваше резюме</b>\n\n"
+        "• ищу вакансии и заказы для фрилансеров по профессии, городу и стажу;\n"
+        "• показываю списком: суть, зарплата, ссылка — свой город и свежие выше;\n"
+        "• учусь на отметках «👎 Не подходит» — похожее перестаёт приходить.\n"
+        "Откликаетесь вы сами по ссылке: от вашего имени я ничего не отправляю.\n\n"
+        "<b>Анкета — около двух минут:</b> ФИО и обращение → резюме → где искать → как часто "
+        "присылать.\n\n"
         "Из резюме выделю профессию, город, навыки и стаж; сам файл не храню — только выжимку."
         f"{sent} Удалить всё о себе — команда /forget.\n\n"
         "Согласны на обработку этих данных для подбора вакансий и заказов?"
@@ -600,6 +607,8 @@ class Onboarding:
                 [_button(BUTTON_FREQUENCY, "freq_edit")],
                 [_button(BUTTON_RESTART, "restart")],
                 [_button(BUTTON_FORGET, "forget")],
+                # справку показывает бот (guide.py), а не анкета — у кнопки свой префикс
+                [InlineKeyboardButton(BUTTON_HELP, callback_data="help:intro")],
             ]
             await reply(format_profile(user.data, self.settings), _markup(rows))
         elif restart or user.step in ("consent", "done"):

@@ -132,6 +132,8 @@ class Pipeline:
         self._clock = clock or (lambda: datetime.now(UTC))
         self._lock = asyncio.Lock()
         self.summarizer = summarizer or CachedSummarizer(BuiltinSummarizer(), storage)
+        # баллы списка: настройки отбора → {заказ: балл}; см. _publish_scores
+        self._scores_memo: tuple[str, dict[str, ScoreResult]] = ("", {})
 
     @property
     def owner_key(self) -> int:
@@ -436,14 +438,34 @@ class Pipeline:
         scoring = self.scoring_settings()
         anketa = self.anketa()
         marked = self.storage.closed_marks(self.owner_key)  # отметки под прежним списком анкеты
-        for p in self.storage.recent_projects(since, OFFER_CLOSED):
-            if (p.platform, p.external_id) in marked:
-                continue
-            result = score_project(p, scoring, p.published_at)
+        projects = [
+            p for p in self.storage.recent_projects(since, OFFER_CLOSED)
+            if (p.platform, p.external_id) not in marked
+        ]  # fmt: skip
+        for p, result in zip(projects, self._publish_scores(projects, scoring), strict=True):
             if self._rejected(p, result, scoring, anketa) or self._paid_response_skipped(p):
                 continue
             items.append((p, result))
         return group_chains(self._ordered(items))[0][:limit]
+
+    def _publish_scores(self, projects: list[Project], scoring: Settings) -> list[ScoreResult]:
+        """Баллы на момент публикации. Тот же заказ при тех же настройках отбора (анкета,
+        отметки) — балл прошлого раза: на сервере (полядра) пересчёт всех за неделю — около
+        5 с, и всё это время бот никому не отвечает (2026-10-26). Секреты в repr настроек
+        не входят (repr=False) и на балл не влияют."""
+        token = repr(scoring)
+        known_token, known = self._scores_memo
+        if token != known_token:
+            known = {}
+        fresh: dict[str, ScoreResult] = {}
+        results = []
+        for p in projects:
+            key = repr(p)
+            result = known.get(key) or fresh.get(key) or score_project(p, scoring, p.published_at)
+            fresh[key] = result
+            results.append(result)
+        self._scores_memo = (token, fresh)  # ушедшие из окна заказы забываются
+        return results
 
     async def response(self, platform: Platform | str, external_id: str) -> Offer | None:
         """Готовый отклик на выбранный заказ: последний черновик (нет — новый) с ценой и

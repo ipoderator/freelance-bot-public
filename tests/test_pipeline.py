@@ -622,3 +622,32 @@ async def test_digest_and_last_show_repeated_vacancy_once(settings, storage, mak
     assert sorted(p.external_id for p, _ in items) == ["0", "9", "f0", "f1"]
     assert storage.get_status("superjob", "3") == "filtered_out"
     assert len(pipeline.offer_candidates(20)) == 4
+
+
+def test_offer_list_reuses_scores_until_project_or_rules_change(settings, storage, monkeypatch,
+                                                                 make_project):  # fmt: skip
+    """Список не пересчитывает баллы тех же заказов при тех же настройках: на сервере это
+    секунды, когда бот никому не отвечает. Новое правило или новый текст — пересчёт."""
+    from freelance_bot import pipeline as module
+
+    settings = replace(settings, owner_id=42)
+    for i in range(3):
+        storage.upsert_project(make_project(external_id=str(i), published_at=NOW))
+    pipeline, _ = make_pipeline(settings, storage, [])
+    calls = []
+    real = module.score_project
+    monkeypatch.setattr(module, "score_project", lambda *a: calls.append(a[0]) or real(*a))
+
+    first = pipeline.offer_candidates(20)
+    assert len(calls) == 3
+    assert pipeline.offer_candidates(20) == first and len(calls) == 3  # из прошлого раза
+
+    storage.upsert_project(make_project(external_id="1", published_at=NOW,
+                                        description="Другой текст: парсер на Python."))  # fmt: skip
+    pipeline.offer_candidates(20)
+    assert [p.external_id for p in calls[3:]] == ["1"]  # только изменённый
+
+    storage.save_lesson(42, "topic", "telegram", -30, "Telegram-бот на Python")
+    after = pipeline.offer_candidates(20)
+    assert len(calls) == 7  # правило отметок — пересчёт всех
+    assert after != first

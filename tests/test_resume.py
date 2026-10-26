@@ -22,6 +22,7 @@ from freelance_bot.resume import (
     analyze,
     builtin_profile,
     city,
+    distinct_items,
     download_url,
     experience_years,
     extract_text,
@@ -529,3 +530,14 @@ def test_profile_roundtrip():
     p = parse_llm_profile(_llm_answer(), RESUME, load_settings(ROOT / "settings.toml",
                                                               ROOT / "no-such.env"))  # fmt: skip
     assert ResumeProfile.from_dict(json.loads(json.dumps(p.to_dict()))) == p
+
+
+def test_education_fragments_are_dropped(settings):
+    """«Среднее специальное; Среднее; специальное» в анкете (проверка 2026-10-26)."""
+    items = ["Среднее специальное", "Среднее", "специальное", "Колледж связи · 2019"]
+    assert distinct_items(items) == ["Среднее специальное", "Колледж связи · 2019"]
+    text = "Иван Иванов\nОбразование\nСреднее специальное\nСреднее\nспециальное\n"
+    assert builtin_profile(text, settings).education == ["Среднее специальное"]
+    raw = json.dumps({"education": ["Среднее специальное", "Среднее", "специальное"]})
+    llm = parse_llm_profile(raw, text, settings)
+    assert llm is not None and llm.education == ["Среднее специальное"]

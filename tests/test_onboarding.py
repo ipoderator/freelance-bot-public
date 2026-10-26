@@ -643,6 +643,10 @@ def test_profile_text_shows_profession_city_jobs_skills_education(env):
     assert "6,8 года" in text and "Горячий цех, &lt;Санитария&gt;" in text
     assert "🎓 Образование: Профессиональное училище" in text
     assert text.count("Повар — Кафе") == 4  # мест работы — не больше четырёх
+    # анкета, разобранная до исправления, хранит обрывки — показываются без них
+    profile["education"] = ["Среднее специальное", "Среднее", "специальное"]
+    text = format_profile({"directions": [], "profile": profile}, env.settings)
+    assert text.endswith("🎓 Образование: Среднее специальное")
 
 
 async def test_cook_resume_gets_cook_vacancies_in_own_city(env):

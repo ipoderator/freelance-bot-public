@@ -32,7 +32,7 @@ from freelance_bot.fit import ResumeFit
 from freelance_bot.http import Fetcher
 from freelance_bot.models import VACANCY_PLATFORMS, Platform, Project, ScoreResult
 from freelance_bot.resume import IT_ROLE_TERMS, ResumeProfile
-from freelance_bot.scoring import MILITARY_KEY, WEAK_TERMS, experience_limit
+from freelance_bot.scoring import HARD_EXCLUSIONS, WEAK_TERMS, experience_limit
 from freelance_bot.sources.superjob import SuperJobSource
 from freelance_bot.sources.tgchannels import TgChannelsSource
 from freelance_bot.sources.trudvsem import MAX_PAGES as TRUDVSEM_PAGES
@@ -200,7 +200,7 @@ def search_queries(profile: ResumeProfile) -> list[str]:
 def user_settings(data: dict[str, Any], settings: Settings) -> Settings:
     """Настройки отбора под анкету. Разработчику — выбранные направления; остальным —
     профессия и навыки из резюме, а исключения владельца (дизайн, 1С, учёба…) не действуют:
-    это может быть их профессия; военная служба отсекается у всех. Стаж — из резюме (без
+    это может быть их профессия; военная служба и накрутка отсекаются у всех. Стаж — из резюме (без
     резюме — 0: стаж владельца из settings.toml чужим не подходит)."""
     chosen = data.get("directions") or []
     profile = resume_profile(data)
@@ -214,7 +214,7 @@ def user_settings(data: dict[str, Any], settings: Settings) -> Settings:
             directions[PROFESSION_KEY] = Direction(keywords=terms)
         if skills := [s for s in (*profile.skills, *profile.keywords) if len(s) >= 3]:
             directions[SKILLS_KEY] = Direction(keywords=skills, weight=SKILLS_WEIGHT)
-        exclusions = {k: v for k, v in settings.exclusions.items() if k == MILITARY_KEY}
+        exclusions = {k: v for k, v in settings.exclusions.items() if k in HARD_EXCLUSIONS}
         fit = resume_fit(profile)
     return replace(
         settings,

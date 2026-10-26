@@ -23,7 +23,7 @@ from freelance_bot.models import (
     ScoreResult,
 )
 from freelance_bot.pricing import Estimate
-from freelance_bot.scoring import DIRECTION_LABELS
+from freelance_bot.scoring import DIRECTION_LABELS, EXCLUSION_NOTES
 
 PLATFORM_NAMES: dict[str, str] = {
     "fl": "FL.ru", "kwork": "Kwork", "work24": "Work24", "freelance_ru": "Freelance.ru",
@@ -57,11 +57,12 @@ LIST_TITLE = "📋 <b>Подходящие предложения</b> — све
 DIGEST_TITLE = "🆕 <b>Новые предложения</b> — {count}"
 PICK_HINT = "Выберите кнопкой или пришлите номер — пришлю готовый отклик."
 VACANCY_PICK_HINT = (
-    "Выберите кнопкой или пришлите номер — пришлю карточку со ссылкой и письмом работодателю."
+    "Выберите кнопкой или пришлите номер — пришлю карточку со ссылкой, письмо работодателю — "
+    "по кнопке под ней."
 )
 MIXED_PICK_HINT = (
     "Выберите кнопкой или пришлите номер — к заказу пришлю готовый отклик, к вакансии — "
-    "письмо работодателю."
+    "карточку со ссылкой, письмо работодателю — по кнопке под ней."
 )
 DIGEST_MORE = (
     "Ещё новых: {rest} — пришлю в следующем списке; все подходящие — «{all}»."
@@ -274,7 +275,16 @@ def format_vacancy_card(p: Project, r: ScoreResult | None, tz: str, summary: str
     return "\n".join(lines)
 
 
-def format_draft(d: Draft, estimated: bool = False) -> str:
+def _missing_note(asks: Sequence[str]) -> str:
+    """Что заказчик просит, а в профиле нет: в текст отклика это не вошло (split_placeholders)."""
+    return (
+        "⚠ <b>Не вошло в текст</b> — заказчик просит, а в профиле этого нет. "
+        f"Если есть, допишите сами: {esc('; '.join(asks))}"
+    )
+
+
+def format_draft(d: Draft, estimated: bool = False, asks: Sequence[str] = ()) -> str:
+    """Черновик под карточкой; `d.text` — уже без меток человеку, `asks` — что по ним дописать."""
     notes = []
     if estimated:
         notes.append(f"цена и срок — оценка бота, свои: «{BUTTON_OFFER}»")
@@ -287,6 +297,8 @@ def format_draft(d: Draft, estimated: bool = False) -> str:
     head = "<b>Черновик отклика</b>"
     if notes:
         head += f" ({esc(', '.join(notes))})"
+    if asks:
+        head += "\n" + _missing_note(asks)
     return f"{head}\n\n{esc(d.text)}"
 
 
@@ -470,9 +482,21 @@ def format_start(
         f"{MENU_LEARNED} — правила из ваших отметок",
         f"{MENU_HELP} — что делает каждая кнопка",
         "",
-        "В списке нажмите предложение или пришлите его номер: к заказу пришлю текст отклика "
-        "с ценой и сроком, к вакансии — карточку и письмо работодателю.",
+        "В списке нажмите предложение или пришлите его номер.",
     ]
+    # у бирж режим draft — отклик готовится сразу, у вакансий notify — только карточка
+    # (проверка в Telegram 2026-10-26: один текст на оба вида путал)
+    if orders or not vacancies:
+        lines.append(
+            f"• Заказ{f' ({esc(_names(orders))})' if orders else ''} — пришлю готовый текст "
+            "отклика с ценой и сроком, вставите его на бирже сами."
+        )
+    if vacancies or not orders:
+        lines.append(
+            f"• Вакансия{f' ({esc(_names(vacancies))})' if vacancies else ''} — пришлю "
+            f"карточку со ссылкой, откликаетесь на сайте; письмо работодателю — по кнопке "
+            f"«{BUTTON_LETTER}» под карточкой."
+        )
     if next_digest:
         lines += ["", f"⏰ Новые присылаю сам {esc(when)}, следующий список — {esc(next_digest)}."]
     lines += ["", f"🧠 {LEARNING_HOW}"]
@@ -529,7 +553,7 @@ def format_applied(p: Project, learned: Sequence[learning.Change] = ()) -> str:
 def format_offer(
     p: Project,
     d: Draft,
-    leftovers: Sequence[str],
+    asks: Sequence[str],
     price_rub: int,
     days: int,
     own: bool = False,
@@ -537,6 +561,7 @@ def format_offer(
 ) -> str:
     """Готовый отклик: текст для копирования, значения полей формы и правила площадки.
 
+    `d.text` — уже без меток человеку (split_placeholders), `asks` — что по ним дописать.
     variant > 0 — ответ на «Другой вариант»: тот же вид, в заголовке номер варианта."""
     site = esc(PLATFORM_NAMES.get(p.platform, p.platform))
     url = html.escape(p.url, quote=True)
@@ -547,8 +572,8 @@ def format_offer(
     lines = [f"{head} {esc(p.title)}", f'🔗 <a href="{url}">Заказ</a>']
     if d.generator == "review":  # отклик не написан: что проверить самому
         return "\n".join([*lines, "", f"⚠ <b>Нужна ручная оценка</b>\n{esc(d.text)}"])
-    if leftovers:
-        lines += ["", f"⚠ Перед отправкой впишите: {esc(', '.join(leftovers))}"]
+    if asks:
+        lines += ["", _missing_note(asks)]
     lines += ["", "📋 <b>Текст</b> — нажмите на него, чтобы скопировать:"]
     lines.append(f"<pre>{esc(d.text)}</pre>")
     whose = "ваши" if own else f"оценка бота, свои — «{BUTTON_OFFER}»"
@@ -635,7 +660,8 @@ def format_filters(settings: Settings) -> str:
     lines.append("🚫 <b>Исключения</b>")
     for name, words in settings.exclusions.items():
         short = ", ".join(words[:6]) + ("…" if len(words) > 6 else "")
-        lines.append(f"• {esc(name)}: {esc(short)}")
+        note = f" ({EXCLUSION_NOTES[name]})" if name in EXCLUSION_NOTES else ""
+        lines.append(f"• {esc(name)}{esc(note)}: {esc(short)}")
     lines.append("")
     lines.append(f"🧠 Правил из ваших отметок: {len(settings.lessons)} — {MENU_LEARNED}, /learned")
     lines.append("")

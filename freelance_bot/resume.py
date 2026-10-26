@@ -416,7 +416,7 @@ def builtin_profile(text: str, settings: Settings, today: date | None = None) ->
         profession=profession(text, jobs),
         city=city(text),
         skills=section_items(text, "skills", MAX_SKILLS),
-        education=section_items(text, "education", MAX_EDUCATION),
+        education=distinct_items(section_items(text, "education", MAX_EDUCATION)),
         jobs=[job.label for job in jobs][:MAX_JOBS],
     )
 
@@ -698,6 +698,14 @@ def section_items(text: str, kind: str, limit: int) -> list[str]:
     return list(items.values())[:limit]
 
 
+def distinct_items(items: list[str]) -> list[str]:
+    """Без обрывков: «Среднее» и «специальное» рядом с «Среднее специальное» — перенос строки
+    в PDF или повтор нейросети, а не отдельные пункты (в анкете было «Среднее специальное;
+    Среднее; специальное», 2026-10-26)."""
+    words = [set(re.findall(r"\w+", x.casefold())) for x in items]
+    return [x for i, x in enumerate(items) if not any(words[i] < other for other in words)]
+
+
 def _without_contacts(text: str) -> str:
     """Почта, телефоны и ссылки не нужны для разбора — нейросети они не отправляются."""
     text = _EMAIL_RE.sub("[почта]", _URL_RE.sub("[ссылка]", text))
@@ -847,7 +855,9 @@ def parse_llm_profile(raw: str, text: str, settings: Settings) -> ResumeProfile 
         ),
         city=next(iter(_quoted(_strings([data.get("city")]), resume, 40)), base.city),
         skills=_quoted(_strings(data.get("skills")), resume, 60)[:MAX_SKILLS] or base.skills,
-        education=_quoted(_strings(data.get("education")), resume, 120)[:MAX_EDUCATION]
+        education=distinct_items(_quoted(_strings(data.get("education")), resume, 120))[
+            :MAX_EDUCATION
+        ]
         or base.education,
         jobs=base.jobs,
     )

@@ -28,10 +28,10 @@ from freelance_bot.drafting import (
     is_truncated,
     make_drafter,
     rank_facts,
-    remaining_placeholders,
     review_draft,
     review_reason,
     similarity,
+    split_placeholders,
     tidy_llm_text,
     validate_draft,
 )
@@ -883,7 +883,6 @@ def test_fill_offer_replaces_placeholders():
     text = "Стоимость: [ЦЕНА], срок: [СРОК]. Примеры: [ПРИМЕРЫ РАБОТ — впиши]"
     out = fill_offer(text, 150000, 14)
     assert out == "Стоимость: 150 000 ₽, срок: 14 дней. Примеры: [ПРИМЕРЫ РАБОТ — впиши]"
-    assert remaining_placeholders(out) == ["[ПРИМЕРЫ РАБОТ — впиши]"]
 
 
 def test_fill_offer_appends_missing_price_and_days():
@@ -894,7 +893,7 @@ def test_fill_offer_appends_missing_price_and_days():
     assert [fill_offer("[ЦЕНА] [СРОК]", 1, d) for d in (1, 5, 11, 21, 22, 112)] == [
         "1 ₽ 1 день", "1 ₽ 5 дней", "1 ₽ 11 дней", "1 ₽ 21 день", "1 ₽ 22 дня", "1 ₽ 112 дней",
     ]
-    assert remaining_placeholders("[A] и [A], [B]") == ["[A]", "[B]"]
+    assert split_placeholders("[A] и [A], [B].") == ("", ["a", "b"])
 
 
 # ── контекст заказа для нейросети ────────────────────────────────────────────
@@ -1128,3 +1127,102 @@ def test_price_and_deadline_from_settings_in_any_spelling(
     priced = dataclasses.replace(llm_settings, offer_price_rub=35000, offer_days=11)
     drafter = LlmDrafter(profile, priced, fake_client(reply(GOOD_LLM_TEXT)))
     assert (drafter._offer_problems(line) == []) is ok
+
+
+# ── заглушки, выдуманный стек, повторный вопрос (проверка в Telegram 2026-10-26) ──
+
+# FL 5526329: черновик пришёл готовым текстом с «[ПУНКТ ЗАКАЗЧИКА: «стек» — ответь]» и
+# «[ПРИМЕРЫ РАБОТ — впиши: …]», планом на «aiogram или python-telegram-bot», расписанием
+WHOLESALE_TITLE = (
+    "Telegram-бот приёма заявок с распознаванием (LLM) и сверкой по каталогу - для оптовой "
+    "компании"
+)
+WHOLESALE_BRIEF = (
+    "Оптовый поставщик для баров и ресторанов (Самара, ~180 клиентов, 15-20 заявок в день). "
+    "Заявки приходят в Telegram в свободной форме: текст, голосовые, скриншоты переписки. "
+    "Сотрудник расшифровывает их вручную.  Нужен закрытый Telegram-бот, который:  принимает "
+    "заявку в любом виде (текст / голос / картинка) извлекает поля: клиент, адрес, позиции, "
+    "количество, срок, оплата сопоставляет позиции с каталогом (~800 SKU, Excel) и клиентов "
+    "со справочником, приводит единицы к штукам сверяет с остатками (файл выгрузки из 1С, 1-2 "
+    "раза в день) показывает карточку на подтверждение; неуверенное - варианты кнопками, "
+    "нераспознанное - помечает, не додумывает отправляет подтверждённую заявку в рабочий чат + "
+    "Excel для загрузки в 1С, копию - менеджеру клиента, пишет журнал доступ только по белому "
+    "списку аккаунтов с ролями  Этап 2 (оценить отдельно): создание заказа в 1С:УТ напрямую, "
+    "доступ для клиентов.  Стек и LLM - на ваш выбор. Полное ТЗ (4 стр.) с шаблоном заявки, "
+    "картой процесса и примерами реальных заявок - по запросу.  В отклике укажите: стек, сроки "
+    "этапа 1, стоимость этапа 1 и 2, стоимость сопровождения и LLM/хостинга в месяц при 400-500 "
+    "заявках, похожие проекты."
+)
+
+
+@pytest.fixture
+def wholesale(make_project, settings) -> tuple[Project, ScoreResult]:
+    p = make_project(title=WHOLESALE_TITLE, description=WHOLESALE_BRIEF, budget_max=50000)
+    return p, score_project(p, settings, p.published_at)
+
+
+async def test_wholesale_draft_shown_without_placeholders(profile, settings, wholesale):
+    p, r = wholesale
+    draft = await BuiltinDrafter(profile, settings, rng_seed=1).generate(p, r)
+    assert validate_draft(draft.text, profile, r.client_requirements) == []
+    # пункт «стек» закрыт ответом, а не меткой; примеров работ в профиле нет — метка
+    assert "[ПУНКТ ЗАКАЗЧИКА" not in draft.text and "Стек: Python" in draft.text
+    shown, asks = split_placeholders(draft.text)
+    assert re.search(r"\[(?!ЦЕНА\]|СРОК\])[^\]]*\]", shown) is None, shown
+    assert "впиши" not in shown and "По вашим пунктам:\n\n" not in shown
+    assert asks == ["примеры работ (ссылки или задача, что сделано, как проверено)"]
+    # без выдуманного стека и расписания; не спрашивает, какую LLM, — «на ваш выбор»
+    for invented in ("aiogram", "python-telegram-bot", "официальный API", "по расписанию"):
+        assert invented not in draft.text, invented
+    assert "Какую LLM" not in draft.text and "какую LLM" not in draft.text
+    assert "полное ТЗ" in question_of(draft.text)
+    assert "Предварительн" in draft.text  # цена и срок до полного ТЗ — оценка
+    assert len(shown) < 1000, len(shown)
+
+
+def test_split_placeholders_drops_marks_and_empty_list_header():
+    text = (
+        "Здравствуйте!\n\nСтоимость: [ЦЕНА], срок: [СРОК].\n\nПо вашим пунктам:\n"
+        "— [ПУНКТ ЗАКАЗЧИКА: «стек» — ответь]\n"
+        "— Примеры похожих работ: [ПРИМЕРЫ РАБОТ — впиши: ссылки или задача, что сделано]\n\n"
+        "Старт: [ДАТА СТАРТА — впиши]. Готов обсудить детали. "
+        "Пример — [ссылка на кейс, напр. git].\n\n"
+        "Вопрос: есть ли хостинг?\n\nИван"
+    )
+    shown, asks = split_placeholders(text)
+    assert shown == (
+        "Здравствуйте!\n\nСтоимость: [ЦЕНА], срок: [СРОК].\n\nГотов обсудить детали.\n\n"
+        "Вопрос: есть ли хостинг?\n\nИван"
+    )
+    assert asks == [
+        "ответ на пункт заказчика «стек»",
+        "примеры работ (ссылки или задача, что сделано)",
+        "дата старта",
+        "ссылка на кейс, напр. git",
+    ]
+
+
+async def test_named_llm_is_not_asked_again_and_not_promised_via_api(
+    make_project, profile, settings
+):
+    p = make_project(
+        title="Интеграция ChatGPT Business с Bitrix24",
+        description="Есть подписка ChatGPT Business. Нужно связать её с CRM Битрикс24, чтобы "
+        "менеджеры получали подсказки по сделкам.",
+    )
+    r = score_project(p, settings, p.published_at)
+    for variant in range(4):
+        text = (await BuiltinDrafter(profile, settings, rng_seed=7).generate(p, r, variant)).text
+        assert "LLM вы планируете" not in text and "официальный API" not in text, text
+
+
+async def test_bot_step_names_library_only_from_brief(make_project, profile, settings):
+    bare = make_project(title="Telegram-бот для записи", description="Нужен бот для записи.")
+    named = make_project(
+        title="Telegram-бот для записи", description="Нужен бот на aiogram с PostgreSQL."
+    )
+    drafter = BuiltinDrafter(profile, settings, rng_seed=3)
+    text = (await drafter.generate(bare, score_project(bare, settings, bare.published_at))).text
+    assert "aiogram" not in text and "python-telegram-bot" not in text
+    text = (await drafter.generate(named, score_project(named, settings, named.published_at))).text
+    assert "aiogram" in text and "PostgreSQL" in text

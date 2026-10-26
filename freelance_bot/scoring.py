@@ -84,9 +84,27 @@ PHP_CMS_TERMS = (
     "netcat", "webasyst",
 )  # fmt: skip
 
+# Сайт на 1С-Битрикс (exclusions.bitrix) — PHP: те же правила, что у exclusions.php.
+# Битрикс24 — облачная CRM, интеграция с ней — automation: в поиске слов 1С-Битрикс
+# упоминания Битрикс24 не участвуют.
+BITRIX_KEY = "bitrix"
+_BITRIX24_RE = re.compile(r"(?:битрикс|bitrix)\s*-?\s*24", re.IGNORECASE)
+
 # Военная служба и контракт с армией («Военнослужащий по контракту … Программисты: Python»):
 # отсекается при любом слове из exclusions.military, сильный профиль не спасает.
 MILITARY_KEY = "military"
+# Накрутка, массовая регистрация аккаунтов, спам (exclusions.abuse): тоже при любом слове.
+# Кроме слов — «100 аккаунтов TikTok» или «сотни аккаунтов» рядом с лайками, комментариями,
+# регистрацией или прогревом.
+ABUSE_KEY = "abuse"
+_MASS_ACCOUNTS_RE = re.compile(
+    r"(?<!\w)(?:\d{2,}|сотн\w*|десятк\w*|тысяч\w*|множеств\w*|много)\s+(?:[\w-]+\s+)?"
+    r"(?:аккаунт|акк(?!\w))",
+    re.IGNORECASE,
+)
+_ACCOUNT_ACTIVITY_RE = re.compile(r"лайк|комментар|регистрац|прогрев|фарм", re.IGNORECASE)
+# Отсекают при любом слове, у всех — и у владельца, и в подборе под анкету (matching.py)
+HARD_EXCLUSIONS = (MILITARY_KEY, ABUSE_KEY)
 
 AI_CONTENT_KEY = "ai_content"
 AI_CONTENT_REASON = "вне профиля: генерация контента в готовых AI-сервисах"
@@ -113,11 +131,19 @@ _EXCLUSION_LABELS = {
     "design": "дизайн",
     "mobile": "мобильная разработка",
     "php": "PHP/CMS",
+    "bitrix": "сайт на 1С-Битрикс",
     "onec": "1С",
     "marketing": "маркетинг/SMM",
     "teaching": "учёба/консультации",
     "manual_qa": "ручное тестирование",
     "military": "военная служба",
+    "abuse": "накрутка, массовые аккаунты или спам",
+}
+# Как работает группа исключений — для /filters: по одним словам этого не видно
+EXCLUSION_NOTES = {
+    "bitrix": "сайты на 1С-Битрикс; Битрикс24 (CRM) не отсекается, его API — automation",
+    "military": "отсекает при любом слове",
+    "abuse": "отсекает при любом слове",
 }
 
 
@@ -341,15 +367,22 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
     else:
         best_stop, best_label = 0, ""
         for key, words in settings.exclusions.items():
-            # у PHP/CMS, AI-контента и военной службы свои правила ниже
-            if key in (PHP_KEY, AI_CONTENT_KEY, MILITARY_KEY):
+            # у PHP/CMS, 1С-Битрикс, AI-контента, военной службы и накрутки свои правила ниже
+            if key in (PHP_KEY, BITRIX_KEY, AI_CONTENT_KEY, *HARD_EXCLUSIONS):
                 continue
             pts, _ = _points(title, description, words)
             if pts > best_stop:
                 best_stop, best_label = pts, _EXCLUSION_LABELS.get(key, key)
-        php_terms = [*settings.exclusions.get(PHP_KEY, []), *PHP_CMS_TERMS]
-        php_points, _ = _points(title, description, php_terms)
-        php_in_title = bool(_find_terms(title, php_terms))
+        bitrix_terms = settings.exclusions.get(BITRIX_KEY, [])
+        php_terms = [*settings.exclusions.get(PHP_KEY, []), *PHP_CMS_TERMS, *bitrix_terms]
+        php_title, php_desc = _BITRIX24_RE.sub(" ", title), _BITRIX24_RE.sub(" ", description)
+        php_points, php_found = _points(php_title, php_desc, php_terms)
+        php_label = (
+            _EXCLUSION_LABELS[BITRIX_KEY]
+            if php_found and all(t in bitrix_terms for t in php_found)
+            else _EXCLUSION_LABELS[PHP_KEY]
+        )
+        php_in_title = bool(_find_terms(php_title, php_terms))
         profile_in_title = any(
             _norm(t) not in WEAK_TERMS
             for d in settings.directions.values()
@@ -365,6 +398,11 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
         strong_profile = bool(ordered) and ordered[0] >= 1.0
         if _find_terms(full_text, settings.exclusions.get(MILITARY_KEY, [])):
             excluded = _EXCLUSION_LABELS[MILITARY_KEY]
+        elif ABUSE_KEY in settings.exclusions and (
+            _find_terms(full_text, settings.exclusions[ABUSE_KEY])
+            or (_MASS_ACCOUNTS_RE.search(full_text) and _ACCOUNT_ACTIVITY_RE.search(full_text))
+        ):
+            excluded = _EXCLUSION_LABELS[ABUSE_KEY]
         elif lessons.excluded:
             excluded = lessons.excluded
         elif fit.excluded:
@@ -373,7 +411,7 @@ def score_project(p: Project, settings: Settings, now: datetime) -> ScoreResult:
             php_points >= MIN_STOP_POINTS and php_outweighs
         ):
             # PHP/CMS-стек не перевешивается сильным профилем: основной объём — PHP.
-            excluded = f"доминирует {_EXCLUSION_LABELS[PHP_KEY]}"
+            excluded = f"доминирует {php_label}"
         elif _find_terms(full_text, settings.exclusions.get(AI_CONTENT_KEY, [])) and all(
             _norm(t) in GENERIC_AI_TERMS for t in matched_terms
         ):

@@ -438,8 +438,9 @@ async def test_offer_flow_fills_price_and_days_and_gives_link(env):
     update, message, _ = update_from(OWNER, text="15000, 5")
     await env.handlers.text(update, None)
     reply = message.replies[0]
-    assert "<pre>Цена 15 000 ₽, срок 5 дней. [ПРИМЕРЫ РАБОТ — впиши]</pre>" in reply
-    assert "⚠ Перед отправкой впишите: [ПРИМЕРЫ РАБОТ — впиши]" in reply
+    # метка человеку в текст для копирования не попадает — отдельной строкой «допишите сами»
+    assert "<pre>Цена 15 000 ₽, срок 5 дней.</pre>" in reply
+    assert "Если есть, допишите сами: примеры работ" in reply
     assert "<b>Поля формы</b> (ваши):" in reply
     assert "• Цена: <code>15000</code> ₽" in reply and "• Срок: <code>5</code> (дней)" in reply
     rows = message.markups[0].inline_keyboard
@@ -1144,6 +1145,12 @@ def test_menu_names_live_sources_and_schedule():
     assert "Kwork" not in text and "Freelance.ru" not in text
     assert "⏰ Новые присылаю сам в 10:00 и 18:00, следующий список — 10:00." in text
     assert "цену со сроком для формы" not in text
+    # у бирж и сайтов вакансий разный сценарий: отклик сразу или карточка и письмо по кнопке
+    assert "• Заказ (FL.ru и Work24) — пришлю готовый текст отклика" in text
+    assert "• Вакансия (SuperJob, Работа России и Telegram-каналы) — пришлю карточку" in text
+    assert "«✉️ Письмо работодателю» под карточкой" in text
+    only_orders = format_start(None, ["fl"])
+    assert "• Заказ (FL.ru)" in only_orders and "• Вакансия" not in only_orders
 
 
 def test_vacancy_list_hint_has_no_price(make_project):
@@ -1151,9 +1158,9 @@ def test_vacancy_list_hint_has_no_price(make_project):
 
     vacancy = make_project(platform="superjob", external_id="1", extra={"area": "Липецк"})
     text = format_offer_list([(vacancy, 50)], "Europe/Moscow")
-    assert "письмом работодателю" in text and "готовый отклик" not in text
+    assert "письмо работодателю — по кнопке" in text and "готовый отклик" not in text
     mixed = format_offer_list([(vacancy, 50), (make_project(), 50)], "Europe/Moscow")
-    assert "к вакансии — письмо работодателю" in mixed
+    assert "к вакансии — карточку со ссылкой, письмо работодателю — по кнопке" in mixed
 
 
 async def test_owner_lessons_belong_to_his_resume(env, make_project):

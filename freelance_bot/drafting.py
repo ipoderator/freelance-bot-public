@@ -280,6 +280,12 @@ _ITEM_KINDS: list[tuple[str, re.Pattern[str], re.Pattern[str], str]] = [
         "указать срок",
     ),
     (
+        "stack",
+        re.compile(r"(?<![а-яё])стек|технологи|на\s+ч[её]м\s+(?:будете|планируете)", re.IGNORECASE),
+        re.compile(r"(?<![а-яё])стек", re.IGNORECASE),
+        "указать стек",
+    ),
+    (
         "covered",  # план и опыт — уже отдельные части черновика
         re.compile(r"как\s+(?:будете|планируете|бы)\s|план|подход|опыт|стаж", re.IGNORECASE),
         re.compile(r"."),
@@ -604,36 +610,53 @@ _BOT_TERMS = (
     "бот", "бота", "боту", "ботом", "боте", "боты", "ботов", "чат-бот", "чатбот", "tg-бот",
     "тг-бот", "mini app", "мини-апп", "webapp",
 )  # fmt: skip
+# Библиотеку, базу, способ подключения и расписание шаг называет, только если их назвало ТЗ:
+# «aiogram или python-telegram-bot», «через официальный API» без основания в брифе — спорные
+# обещания (проверка в Telegram 2026-10-26).
 _BOT_STEPS = [
-    "соберу бота на {lib}: сценарии, кнопки, хранение состояния {store}",
-    "сделаю бота на {lib} с понятными сценариями и клавиатурами, состояние — {store}",
+    "соберу бота{lib}: сценарии и кнопки{store}",
+    "сделаю бота{lib} с понятными сценариями и клавиатурами{store}",
 ]
 _BACKEND_STEPS = [
     "сделаю backend на {fw}{db}: понятный REST API, логирование и обработка ошибок",
     "вынесу логику в сервис на {fw}{db} с понятным REST API",
 ]
 _BACKEND_DEFAULT_STEPS = [
-    "вынесу логику в сервис на FastAPI с базой PostgreSQL и понятным REST API",
-    "сделаю backend на FastAPI (или Django, если вам так удобнее) с PostgreSQL",
+    "вынесу логику в отдельный сервис на Python с понятным API, фреймворк и базу выберу "
+    "под ваши требования",
+    "сделаю backend на Python, фреймворк и базу согласуем по ТЗ",
 ]
 _AI_STEPS = [
-    "подключу {llm} через официальный API{orch}: опишу инструменты и сценарии агента, "
-    "добавлю логирование запросов и ответов",
-    "подключу {llm} через официальный API{orch}: промпты, инструменты, проверка ответов "
-    "и логирование",
+    "подключу {llm}{orch}: промпты, проверка ответов и журнал запросов",
+    "встрою {llm}{orch} с проверкой ответов и журналом запросов",
 ]
 _AUTOMATION_STEPS = [
-    "{how}{services} — с запуском по расписанию, логами и уведомлениями о сбоях",
-    "{how}{services} — запуск по расписанию, журнал и оповещение при ошибках",
+    "{how}{services}{when} с журналом и оповещением об ошибках",
+    "{how}{services}{when}, ошибки — в журнал и уведомлением",
 ]
+_SCHEDULE_RE = re.compile(
+    r"расписани|cron|крон|ежедневн|еженедельн|каждый\s+(?:день|час)|раз\s+в\s+(?:день|час|сутки|недел)",
+    re.IGNORECASE,
+)
 _PARSING_STEPS = [
-    "напишу сборщик данных на {libs}, с повтором при сбоях и паузами между запросами{out}",
-    "сделаю парсер на {libs}: повторы при ошибках, паузы{out}",
+    "напишу сборщик данных{libs} с повтором при сбоях и паузами между запросами{out}",
+    "сделаю парсер{libs}: повторы при ошибках, паузы{out}",
 ]
 
 
 def _join(names: list[str]) -> str:
     return names[0] if len(names) == 1 else ", ".join(names[:-1]) + " и " + names[-1]
+
+
+# Что из названного в ТЗ — стек, а не сервисы заказчика (таблицы, CRM, мессенджер)
+_STACK_ROLES = ("framework", "bot_lib", "db", "llm", "scraping", "orchestrator")
+
+
+def _stack_answer(brief: str) -> str:
+    """Ответ на пункт «стек»: Python и то, что названо в ТЗ, остальное — после полного ТЗ."""
+    stack = _brief_stack(brief)
+    named = [name for role in _STACK_ROLES for name in stack.get(role, [])]
+    return f"Стек: {_join(['Python', *named])}, остальное предложу после полного ТЗ."
 
 
 def _brief_stack(brief: str) -> dict[str, list[str]]:
@@ -667,6 +690,7 @@ _GAP_STEP = (
 )
 _SKILL_NOTE = "В навыках резюме: {skills}."
 MAX_FACTS = 2  # 1–2 самых близких факта, а не весь стек (RUBRIC.md, п. 5)
+MAX_STEPS = 2  # план из 2–3 пунктов вместе с проверкой результата: отклик короткий
 
 # Ручная оценка до генератора: заказчик требует подтверждённые кейсы или опыт с технологией,
 # которой нет в фактах — честного отклика с такими кейсами не написать (RUBRIC.md). «Ищем
@@ -727,12 +751,47 @@ _GENERIC_QUESTIONS = [
     "Есть ли пример или референс того, как всё должно выглядеть в итоге?",
     "Есть ли дата, к которой результат нужен обязательно?",
 ]
+_HOSTING_RE = re.compile(r"сервер|хостинг|vps|облак", re.IGNORECASE)
+# Вопрос, на который ТЗ уже ответило, не задаётся: «Какую LLM…», когда заказчик назвал
+# ChatGPT Business или написал «LLM — на ваш выбор» (проверка в Telegram 2026-10-26).
+_ANSWERED_BY_BRIEF: dict[str, re.Pattern[str]] = {
+    "Бот нужен только для личных сообщений или ещё для групп и каналов?": re.compile(
+        r"групп|канал|(?<![а-яё])чат(?![а-яё-])", re.IGNORECASE
+    ),
+    "Есть ли уже сервер или хостинг, куда разворачивать бота?": _HOSTING_RE,
+    "Где планируется хостинг — свой сервер или облако?": _HOSTING_RE,
+    "Есть ли готовая схема данных или существующий код, к которому нужно подключиться?": (
+        re.compile(r"существующ|текущ\w*\s+код|репозитор|схем\w*\s+данн", re.IGNORECASE)
+    ),
+    "Какую LLM вы планируете использовать и есть ли уже доступ к её API?": re.compile(
+        r"openai|chat\s?gpt|(?<![a-z])gpt|claude|gemini|gigachat|гигачат|yandexgpt|deepseek"
+        r"|llama|mistral|qwen|(?:llm|нейросет\w*|модел\w*)[^.\n]{0,20}на\s+ваш\w*\s+(?:выбор|усмотрени)",
+        re.IGNORECASE,
+    ),
+    "Какие действия агент должен выполнять сам, а какие — только с подтверждения человека?": (
+        re.compile(r"подтвержд", re.IGNORECASE)
+    ),
+    "Как часто процесс должен запускаться и кому сообщать об ошибках?": _SCHEDULE_RE,
+    "В каком формате удобнее получать результат — CSV, Excel, Google Sheets или база?": (
+        re.compile(r"csv|excel|xlsx|json|google\s*sheets|(?:гугл|google)\s*таблиц", re.IGNORECASE)
+    ),
+}
+# Полное ТЗ «по запросу»: главный вопрос — прислать его, оценка до него предварительная
+_FULL_BRIEF_RE = re.compile(
+    r"(?:полн|подробн)\w*\s+(?:тз|техническ\w*\s+задани)|тз[^.\n]{0,60}по\s+запросу",
+    re.IGNORECASE,
+)
+_FULL_BRIEF_QUESTION = "пришлёте полное ТЗ, чтобы уточнить оценку и план?"
 _QUESTION_LEADS = ["Вопрос: {q}", "Уточню один момент: {q}", "Один вопрос: {q}"]
+# Цена и срок до разговора с заказчиком — оценка, а не твёрдое предложение
 _PRICE_WITH_BUDGET = [
-    "Ваш бюджет — {budget}. Моя оценка: {price}, срок: {days}.",
-    "Вижу бюджет {budget}. Стоимость: {price}, срок — {days}.",
+    "Ваш бюджет — {budget}. Предварительная оценка: {price}, срок: {days}.",
+    "Вижу бюджет {budget}. Предварительно: {price}, срок — {days}.",
 ]
-_PRICE_NO_BUDGET = ["Стоимость: {price}, срок: {days}.", "Оценка: {price}, срок — {days}."]
+_PRICE_NO_BUDGET = [
+    "Предварительная оценка: {price}, срок: {days}.",
+    "Предварительно: {price}, срок — {days}.",
+]
 _REQ_PRICE_RE = re.compile(r"\b(отклик|укажите|напишите|начните|пришлите|ответьте)", re.IGNORECASE)
 
 
@@ -776,9 +835,51 @@ def fill_estimate(text: str, price_rub: int, days: int) -> str:
     )
 
 
-def remaining_placeholders(text: str) -> list[str]:
-    """Метки вида [ПРИМЕРЫ РАБОТ — впиши], которые пользователь должен заполнить сам."""
-    return list(dict.fromkeys(_PLACEHOLDER_RE.findall(text)))
+# Метки, которые человек заполняет сам, в показанный отклик не попадают: текст с
+# «[ПРИМЕРЫ РАБОТ — впиши]» легко отправить заказчику как есть (проверка в Telegram
+# 2026-10-26). В базе черновик хранится с метками — по ним валидатор видит, что пункт
+# заказчика закрыт.
+_MARK = "\ue000"  # на время разбивки на предложения: точка внутри метки не режет её
+_SENTENCE_RE = re.compile(r"[^.!?]*(?:[.!?]+|$)\s*")
+_ITEM_MARK_RE = re.compile(r"^ПУНКТ ЗАКАЗЧИКА:\s*(.+?)\s*—\s*\w+$")
+
+
+def _placeholder_ask(mark: str) -> str:
+    """«[ПРИМЕРЫ РАБОТ — впиши: ссылки]» → «примеры работ (ссылки)» — что дописать самому."""
+    inner = mark[1:-1].strip()
+    if m := _ITEM_MARK_RE.match(inner):
+        return f"ответ на пункт заказчика {m.group(1)}"
+    head, _, tail = inner.partition(" — ")
+    head = head.lower() if head.isupper() else head
+    detail = re.sub(r"^(?:впиши|ответь)\s*:?\s*", "", tail.strip(), flags=re.IGNORECASE)
+    return f"{head} ({detail})" if detail else head
+
+
+def split_placeholders(text: str) -> tuple[str, list[str]]:
+    """Отклик для показа без меток человеку и список, что по ним дописать самому.
+
+    Уходит предложение с меткой; пустая после этого строка и подпись перечня без пунктов
+    («По вашим пунктам:») — тоже. [ЦЕНА] и [СРОК] остаются: их заполняет оценка или кнопка."""
+    asks: list[str] = []
+    kept: list[str] = []
+    for line in text.split("\n"):
+        marks = _EXTRA_PLACEHOLDER_RE.findall(line)
+        if not marks:
+            kept.append(line)
+            continue
+        asks += [a for a in dict.fromkeys(map(_placeholder_ask, marks)) if a not in asks]
+        masked = _EXTRA_PLACEHOLDER_RE.sub(_MARK, line)
+        rest = "".join(x for x in _SENTENCE_RE.findall(masked) if _MARK not in x).rstrip()
+        if re.search(r"\w", rest):
+            kept.append(rest)
+    lines: list[str] = []
+    for i, line in enumerate(kept):
+        after = next((x for x in kept[i + 1 :] if x.strip()), "")
+        if line.rstrip().endswith(":") and not (after and kept[i + 1].strip()):
+            continue  # подпись перечня, все пункты которого ушли
+        lines.append(line)
+    clean = re.sub(r"\n{3,}", "\n\n", "\n".join(lines)).strip()
+    return clean, asks
 
 
 def _budget(p: Project) -> str | None:
@@ -958,9 +1059,14 @@ class BuiltinDrafter:
             questions = list(_FIX_QUESTIONS)
         else:
             questions = list(_QUESTIONS.get(directions[0], [])) if directions else []
-        questions = questions or list(_GENERIC_QUESTIONS)
+        questions = [
+            q for q in questions
+            if not ((answered := _ANSWERED_BY_BRIEF.get(q)) and answered.search(brief))
+        ] or list(_GENERIC_QUESTIONS)
         first = questions.index(pick(questions, 10))
         rotated = [_lower_first(q) for q in questions[first:] + questions[:first]]
+        if _FULL_BRIEF_RE.search(brief):
+            rotated.insert(0, _FULL_BRIEF_QUESTION)
         fresh = [q for q in rotated if q not in last]
         if not fresh:  # весь пул уже был в прошлом черновике — берём общий вопрос
             fresh = [_lower_first(q) for q in _GENERIC_QUESTIONS if _lower_first(q) not in last]
@@ -1008,9 +1114,9 @@ class BuiltinDrafter:
             if d == "telegram":
                 if not find_terms(brief, _BOT_TERMS):
                     continue  # Telegram упомянут, но бот не заказан
-                libs = named("bot_lib")
-                lib = _join(libs) if libs else "aiogram или python-telegram-bot"
-                store = f"в {_join(stores)}" if stores else "в базе"
+                libs, dbs = named("bot_lib"), named("db")
+                lib = f" на {_join(libs)}" if libs else ""
+                store = f", данные — в {_join(dbs)}" if dbs else ""
                 steps.append(pick(_BOT_STEPS, part).format(lib=lib, store=store))
             elif d == "backend":
                 fw, db = named("framework"), named("db")
@@ -1036,15 +1142,16 @@ class BuiltinDrafter:
                         how += " с Python-скриптами"
                 else:
                     how = "автоматизирую процесс на Python"
-                tail = f": {_join(services)}" if services else ""
-                steps.append(pick(_AUTOMATION_STEPS, part).format(how=how, services=tail))
-            elif d == "parsing":
-                libs = _join(named("scraping")) if named("scraping") else (
-                    "httpx и BeautifulSoup или Scrapy"
+                tail = f" ({_join(services)})" if services else ""
+                when = " по расписанию" if _SCHEDULE_RE.search(brief) else ""
+                steps.append(
+                    pick(_AUTOMATION_STEPS, part).format(how=how, services=tail, when=when)
                 )
+            elif d == "parsing":
+                libs = f" на {_join(named('scraping'))}" if named("scraping") else ""
                 out = f", выгрузка в {_join(stores)}" if stores else ""
                 steps.append(pick(_PARSING_STEPS, part).format(libs=libs, out=out))
-            if len(steps) == 3:
+            if len(steps) == MAX_STEPS:
                 break
         return steps
 
@@ -1078,6 +1185,8 @@ class BuiltinDrafter:
                     add("availability", f"Доступность на весь период: {AVAILABILITY_PLACEHOLDER}.")
                 if "materials" in kinds:
                     add("materials", f"Для оценки и старта понадобятся: {self._materials(p)}.")
+                if "stack" in kinds:
+                    add("stack", _stack_answer(f"{p.title}\n{p.description}"))
                 # цена и срок — в строке со стоимостью, план и опыт — в своих частях
                 if not kinds and not word:
                     add(
@@ -1133,7 +1242,7 @@ class BuiltinDrafter:
         return tasks
 
     def _detail(self, p: Project, variant: int) -> str | None:
-        """1–2 предложения из описания ТЗ, безопасные для цитирования."""
+        """Одно предложение из описания ТЗ, безопасное для цитирования: отклик короткий."""
         candidates: list[str] = []
         title_words = set(_shingles(p.title))
         for sentence in re.split(r"(?<=[.!?])\s+|\n+", p.description):
@@ -1151,9 +1260,7 @@ class BuiltinDrafter:
                 candidates.append(_lower_first(whole))
         if not candidates:
             return None
-        start = variant % len(candidates)
-        chosen = candidates[start : start + 2] or candidates[:1]
-        return "; ".join(chosen)
+        return candidates[variant % len(candidates)]
 
     def _facts(
         self, p: Project, directions: list[str], matched_terms: list[str], variant: int
@@ -1268,7 +1375,11 @@ _SYSTEM_PROMPT = """\
 своими словами, со словом «понял» или «понимаю». Не повторяй заголовок и не пересказывай ТЗ.
 2. План: абзац начни со слова «Предлагаю», затем 2–3 проверяемых шага одним-двумя \
 предложениями без списка: что сначала проверю или согласую, что сделаю, как проверю \
-результат. Технологии — только те, что нужны задаче.
+результат. Технологии — только те, что нужны задаче. Библиотеку, фреймворк, базу, нейросеть \
+и способ подключения («через официальный API») называй, только если их называет ТЗ; не \
+перечисляй альтернативы («aiogram или python-telegram-bot») и не добавляй расписание, \
+развёртывание и прочее, о чём ТЗ не просит. Решение, которое зависит от неясных требований, \
+подай как вариант после уточнения.
 3. Опыт — со словом «опыт»: 1–2 факта из подтверждённого опыта, ближе всего к этой задаче, \
 и одна фраза, чем они помогут здесь. Факт пересказывай близко к тексту, не добавляя \
 технологий, задач и результатов, которых в нём нет; стаж — ровно как в факте, не округляй. \
@@ -1276,9 +1387,12 @@ _SYSTEM_PROMPT = """\
 держится на технологии или типе проекта, которых в фактах нет, скажи прямо одной фразой, \
 что резюме этот опыт не подтверждает, и сделай проверку осуществимости первым шагом плана.
 4. Строка «Стоимость: <цена>, срок: <срок>.» — цена и срок из входных данных без изменений; \
-метки [ЦЕНА] и [СРОК] переноси буквально, с квадратными скобками.
-5. Один конкретный вопрос по задаче, ответ на который поможет оценить работу. Во всём \
-тексте ровно один знак «?».
+метки [ЦЕНА] и [СРОК] переноси буквально, с квадратными скобками. Если ТЗ неполное \
+(обрезано, полное ТЗ «по запросу», объём не ясен), сразу после строки добавь: «Оценка \
+предварительная, уточню после ТЗ.»
+5. Один конкретный вопрос по задаче, ответ на который поможет оценить работу. Не спрашивай \
+о том, что ТЗ уже сказало: какую нейросеть, если она названа или оставлена «на ваш выбор»; \
+какой стек, если он назван. Во всём тексте ровно один знак «?».
 6. Последняя строка — подпись: только имя «{name}».
 
 Жёсткие правила:
@@ -1322,6 +1436,7 @@ _REQUIREMENT_LINES = {
     "hours": f"Время на проект: {HOURS_PLACEHOLDER} в неделю.",
     "availability": f"Доступность на весь период: {AVAILABILITY_PLACEHOLDER}.",
     "materials": "Для старта понадобятся: <что нужно от заказчика: доступы, ТЗ, данные>.",
+    "stack": "Стек: <Python и то, что названо в ТЗ>, остальное предложу после полного ТЗ.",
 }
 
 

@@ -13,6 +13,7 @@ import json
 import logging
 import random
 import re
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -46,7 +47,7 @@ from freelance_bot.cover_letter import (
     applicant_from_anketa,
     applicant_from_profile,
 )
-from freelance_bot.drafting import remaining_placeholders
+from freelance_bot.drafting import split_placeholders
 from freelance_bot.learning import REASONS, nothing_to_learn
 from freelance_bot.matching import VacancySearch, completed_anketa
 from freelance_bot.models import Project, ScoreResult
@@ -749,10 +750,11 @@ class BotHandlers:
                 ],
             ]
         )
-        leftovers = remaining_placeholders(ready.draft.text)
+        text, asks = split_placeholders(ready.draft.text)
         await message.reply_text(
             format_offer(
-                p, ready.draft, leftovers, ready.price_rub, ready.days, ready.own, ready.variant
+                p, replace(ready.draft, text=text), asks,
+                ready.price_rub, ready.days, ready.own, ready.variant,
             ),
             parse_mode=ParseMode.HTML,
             reply_markup=markup,

@@ -25,7 +25,7 @@ from freelance_bot.matching import (
 )
 from freelance_bot.models import Project
 from freelance_bot.resume import ResumeProfile, builtin_profile, extract_text
-from freelance_bot.scoring import MILITARY_KEY, score_project
+from freelance_bot.scoring import HARD_EXCLUSIONS, score_project
 
 ROOT = Path(__file__).resolve().parent.parent
 RESUMES = ROOT / "tests" / "fixtures" / "resumes"
@@ -86,8 +86,9 @@ def test_not_developer_is_matched_by_profession_and_skills(settings):
     own = user_settings(data, settings)
     assert set(own.directions) == {PROFESSION_KEY, SKILLS_KEY}
     assert "1С: Бухгалтерия" in own.directions[SKILLS_KEY].keywords
-    # исключения владельца (1С, дизайн, учёба…) — чья-то профессия; военная служба — нет
-    assert list(own.exclusions) == [MILITARY_KEY]
+    # исключения владельца (1С, дизайн, учёба…) — чья-то профессия; военная служба и
+    # накрутка — нет
+    assert tuple(own.exclusions) == HARD_EXCLUSIONS
     assert own.experience_years == 3.8
 
 

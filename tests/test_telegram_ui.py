@@ -146,6 +146,9 @@ def test_filters_lists_directions_exclusions_and_limits():
     assert "min_score" in out and f"min_score: {s.min_score}" in out
     assert "design" in out
     assert "draft" in out
+    # пользователь видит, что Битрикс24 не отсекается, а накрутка — при любом слове
+    assert "• bitrix (сайты на 1С-Битрикс; Битрикс24 (CRM) не отсекается" in out
+    assert "• abuse (отсекает при любом слове): накрут" in out
 
 
 def test_status_paused_and_kwork_warning():
@@ -196,9 +199,9 @@ def test_offer_prompt_and_ready_offer_are_escaped(make_project):
     p = make_project(title="Сайт <script>")
     assert "Сайт &lt;script&gt;" in format_offer_prompt(p)
     d = Draft("Цена 5 000 ₽ <b>", "builtin", False, False)
-    out = format_offer(p, d, ["[ПРИМЕРЫ РАБОТ — впиши]"], 5000, 1)
+    out = format_offer(p, d, ["примеры <работ>"], 5000, 1)
     assert "<pre>Цена 5 000 ₽ &lt;b&gt;</pre>" in out
-    assert "⚠ Перед отправкой впишите: [ПРИМЕРЫ РАБОТ — впиши]" in out
+    assert "Если есть, допишите сами: примеры &lt;работ&gt;" in out
     assert "• Срок: <code>1</code> (день)" in out and "оценка бота" in out
     assert "до трёх работ" in out
     kwork = format_offer(make_project(platform="kwork"), d, [], 5000, 3, own=True)

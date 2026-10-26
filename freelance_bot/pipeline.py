@@ -13,7 +13,7 @@ from typing import Any, Protocol
 
 from freelance_bot import learning
 from freelance_bot.config import Settings
-from freelance_bot.drafting import DraftGenerator, fill_estimate, fill_offer
+from freelance_bot.drafting import DraftGenerator, fill_estimate, fill_offer, split_placeholders
 from freelance_bot.http import BlockedError, SourceError
 from freelance_bot.matching import (
     completed_anketa,
@@ -293,8 +293,9 @@ class Pipeline:
         self.storage.set_status(*pid, "notified")
         if draft is None:
             return
-        shown = self._with_estimate(draft, guess.price_rub, guess.days)
-        await self.notifier.send_text(format_draft(*shown))
+        shown, estimated = self._with_estimate(draft, guess.price_rub, guess.days)
+        text, asks = split_placeholders(shown.text)
+        await self.notifier.send_text(format_draft(replace(shown, text=text), estimated, asks))
         reason = "; ".join(decision.reasons) or None
         self.storage.set_status(*pid, "drafted")
 

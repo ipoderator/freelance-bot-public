@@ -53,6 +53,7 @@ from freelance_bot.resume import (
     ResumeError,
     ResumeProfile,
     analyze,
+    distinct_items,
     extract_text,
     fetch_link,
     find_link,
@@ -471,7 +472,8 @@ def format_profile(data: dict[str, Any], settings: Settings) -> str:
         if p.skills:
             lines.append(f"🧩 Навыки: {e(', '.join(p.skills))}")
         if p.education:
-            lines.append(f"🎓 Образование: {e('; '.join(p.education))}")
+            # distinct_items и здесь: анкеты, разобранные раньше, хранят обрывки
+            lines.append(f"🎓 Образование: {e('; '.join(distinct_items(p.education)))}")
         if p.keywords:
             lines.append(f"🔑 Ключевые слова: {e(', '.join(p.keywords))}")
         if p.facts:

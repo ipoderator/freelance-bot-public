@@ -653,3 +653,92 @@ def test_experience_with_words_between_is_penalized(make_project, settings):
         settings.requirement_penalty
     )
     assert "⚠ требование: опыт от 3 лет" in " ".join(score(hard, settings).reasons)
+
+
+# ── накрутка и массовые аккаунты; 1С-Битрикс и Битрикс24 (проверка 2026-10-26) ──
+
+
+@pytest.mark.parametrize(
+    ("title", "description"),
+    [
+        (  # FL 5526245, прошёл с 47–49 баллами
+            "Авторегистратор почт outlook/hotmail",
+            "Необходимо создать скрипт автоматически регистрирующий почту outlook. Приветствуется "
+            "создание как с помощью библиотеки Selenium(python) так и написание авторегера на "
+            "запросах...",
+        ),
+        (  # прошёл с 40 баллами
+            "Python-скрипт для управления аккаунтами TikTok",
+            "Нужно управлять 100 аккаунтами TikTok: массовые комментарии и лайки по расписанию, "
+            "прокси на каждый аккаунт.",
+        ),
+        (
+            "Telegram-бот для накрутки просмотров",
+            "Бот на aiogram, который накручивает просмотры и реакции в каналах.",
+        ),
+        (
+            "Парсер и ферма аккаунтов Instagram",
+            "Сотни аккаунтов, прогрев и автоматические подписки через Python и Playwright.",
+        ),
+    ],
+    ids=["outlook-autoreg", "tiktok-100-accounts", "views", "farm"],
+)
+def test_account_abuse_is_excluded_even_with_strong_profile(
+    make_project, settings, title, description
+):
+    r = score(mk(make_project, title=title, description=description), settings)
+    assert r.passed is False
+    assert r.excluded_reason == "накрутка, массовые аккаунты или спам", r
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Бот-модератор для чата: защита от спама, бан за ссылки, приветствие.",
+        "Регистрация пользователей в боте, личный кабинет на FastAPI.",
+        "Админка на FastAPI для 50 аккаунтов менеджеров, роли и журнал действий.",
+    ],
+)
+def test_ordinary_accounts_and_spam_protection_are_not_abuse(make_project, settings, description):
+    r = score(mk(make_project, title="Telegram-бот на Python", description=description), settings)
+    assert r.excluded_reason is None and r.passed, r
+
+
+def test_bitrix24_integration_is_not_php(make_project, settings):
+    r = score(
+        mk(
+            make_project,
+            title="Интеграция ChatGPT Business с Bitrix24",
+            description="Нужно связать ChatGPT с CRM Битрикс24 через REST API Битрикс24, "
+            "чтобы менеджеры получали подсказки по сделкам. Python.",
+        ),
+        settings,
+    )
+    assert r.excluded_reason is None and r.passed, r
+    assert "automation" in r.directions
+
+
+def test_bitrix24_portal_admin_is_out_of_profile_not_php(make_project, settings):
+    r = score(
+        mk(
+            make_project,
+            title="Ищем специалиста по настройке и сопровождению Битрикс24 на проект",
+            description="Администрирование, поддержка и развитие портала Битрикс24 в облачной "
+            "или коробочной версии.",
+        ),
+        settings,
+    )
+    assert r.passed is False and r.excluded_reason == "вне профиля", r
+
+
+def test_1c_bitrix_site_is_excluded_as_bitrix(make_project, settings):
+    r = score(
+        mk(
+            make_project,
+            title="Доработка сайта на 1С-Битрикс",
+            description="Нужно доработать компонент каталога на Битриксе и выгрузку в Excel.",
+        ),
+        settings,
+    )
+    assert r.passed is False
+    assert r.excluded_reason == "доминирует сайт на 1С-Битрикс", r

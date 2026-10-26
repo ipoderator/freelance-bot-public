@@ -52,7 +52,7 @@ class ScoreResult:
 @dataclass(frozen=True)
 class Draft:
     text: str
-    generator: Literal["builtin", "llm"]
+    generator: Literal["builtin", "llm", "review"]  # review — не отклик: нужна ручная оценка
     price_placeholder: bool  # True — в тексте стоит [ЦЕНА]
     deadline_placeholder: bool  # True — в тексте стоит [СРОК]
 

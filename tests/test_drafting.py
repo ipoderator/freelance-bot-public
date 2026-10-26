@@ -16,6 +16,9 @@ import pytest
 from freelance_bot.config import DEFAULT_LLM_MODEL, Settings, load_settings
 from freelance_bot.drafting import (
     BRIEF_MAX_CHARS,
+    MAX_DRAFT_CHARS,
+    PROMPT_EXAMPLES,
+    REVIEW_GENERATOR,
     TRUNCATED_NOTE,
     BuiltinDrafter,
     LlmDrafter,
@@ -26,12 +29,14 @@ from freelance_bot.drafting import (
     make_drafter,
     rank_facts,
     remaining_placeholders,
+    review_draft,
+    review_reason,
     similarity,
     tidy_llm_text,
     validate_draft,
 )
 from freelance_bot.models import Project, ScoreResult
-from freelance_bot.profile import Profile, load_profile
+from freelance_bot.profile import Fact, Profile, load_profile
 from freelance_bot.scoring import extract_client_requirements, score_project
 from freelance_bot.sources.fl import parse_fl_rss
 from freelance_bot.sources.kwork import parse_kwork_projects
@@ -177,7 +182,8 @@ async def test_client_requirement_is_fulfilled(
 
 
 def test_validator_flags_unmet_codeword_and_missing_price() -> None:
-    profile = Profile(name="Иван", confirmed_experience=[], target_directions=[])
+    fastapi = Fact("fastapi", "сервисы на FastAPI", ["backend"], "FastAPI")
+    profile = Profile(name="Иван", confirmed_experience=[fastapi], target_directions=[])
     text = (
         "Понял задачу: бот. Предлагаю сделать на aiogram. Мой опыт: FastAPI. Какой хостинг?\nИван"
     )
@@ -569,7 +575,7 @@ async def test_llm_reply_with_bare_question_mark_falls_back(
     assert draft.generator == "builtin"
 
 
-async def test_rejected_llm_reply_is_fixed_by_the_model_once(
+async def test_rejected_llm_reply_is_fixed_by_the_model_up_to_twice(
     profile: Profile, llm_settings: Settings, tg_project: Project
 ) -> None:
     no_price = GOOD_LLM_TEXT.replace("Стоимость: [ЦЕНА], срок: [СРОК]. ", "")
@@ -581,9 +587,13 @@ async def test_rejected_llm_reply_is_fixed_by_the_model_once(
     assert fix[1]["content"] == tidy_llm_text(no_price, "Иван")
     assert "- нет метки [ЦЕНА]" in fix[2]["content"]
 
-    client = fake_client([reply(no_price), reply(no_price)])  # не исправила — встроенный
+    client = fake_client([reply(no_price), reply(no_price), reply(GOOD_LLM_TEXT)])
     draft = await LlmDrafter(profile, llm_settings, client).generate(tg_project, TG_SCORE)
-    assert draft.generator == "builtin" and len(client.beta.messages.calls) == 2
+    assert draft.generator == "llm" and len(client.beta.messages.calls) == 3  # со второго раза
+
+    client = fake_client([reply(no_price)] * 3)  # не исправила дважды — встроенный
+    draft = await LlmDrafter(profile, llm_settings, client).generate(tg_project, TG_SCORE)
+    assert draft.generator == "builtin" and len(client.beta.messages.calls) == 3
 
 
 async def test_technology_outside_profile_in_experience_is_sent_back(
@@ -934,3 +944,187 @@ async def test_llm_prompt_carries_order_conditions_and_ranked_facts(
     assert "штраф 500 ₽" in prompt  # правила Work24
     assert "Ближе всего к этой задаче:\n" in prompt and "\nОстальное:\n" in prompt
     assert "раздел биржи и условия заказа" in client.beta.messages.calls[0]["system"]
+
+
+# ── эталоны откликов (2026-10-26): честные границы опыта и ручная оценка ───────────
+
+HONEST = Profile(
+    name="Иван",
+    confirmed_experience=[
+        Fact("rest", "делал REST API и интеграции", ["backend"], "REST API"),
+        Fact("pytest", "Pytest и Docker", ["backend"], "Pytest Docker", skill=True),
+    ],
+    target_directions=[],
+    experience_years=1.8,
+)
+STRUCTURE = "Здравствуйте! Понял задачу. Предлагаю план. {claim} Какой у вас доступ?\nИван"
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "Ранее внедрял MCP в Revit, опыт есть.",
+        "Есть опыт работы с Bitrix24.",
+        "Знаю Revit API.",
+        "Опыт: у меня 10 лет опыта.",
+        "Опыт есть, готов начать сегодня.",
+        "Опыт есть, гарантирую готовый результат за 11 дней.",
+        "Опыт: ускорил API на 40%.",
+    ],
+)
+def test_validator_rejects_made_up_experience_and_promises(claim: str) -> None:
+    assert validate_draft(STRUCTURE.format(claim=claim), HONEST, [])
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [
+        "Опыт: делал REST API и интеграции.",
+        "Опыта с Revit и MCP резюме не подтверждает, начну с проверки осуществимости.",
+        "Мой опыт с REST поможет, а подключение Revit проверю первым шагом.",
+        "Опыт: в навыках резюме — Pytest и Docker.",
+        "Опыт есть, старт: [ДАТА СТАРТА — впиши].",
+    ],
+)
+def test_validator_accepts_confirmed_experience_and_honest_gaps(claim: str) -> None:
+    assert validate_draft(STRUCTURE.format(claim=claim), HONEST, []) == []
+
+
+REVIT_DEMAND = (
+    "Нужен разработчик Revit API и MCP. Требуется показать уже выполненные проекты с Revit."
+)
+
+
+async def test_demand_for_unconfirmed_cases_goes_to_review_before_any_generator(
+    profile: Profile, llm_settings: Settings, make_project
+) -> None:
+    p = make_project(title="Плагин для Revit", description=REVIT_DEMAND)
+    r = dataclasses.replace(TG_SCORE, client_requirements=["Укажите два кейса Revit"])
+    client = fake_client(reply(GOOD_LLM_TEXT))
+    draft = await LlmDrafter(profile, llm_settings, client).generate(p, r)
+    assert draft.generator == REVIEW_GENERATOR and "Revit" in draft.text
+    assert client.beta.messages.calls == []  # модель не вызывалась
+    assert (await BuiltinDrafter(profile, llm_settings).generate(p, r)).generator == "review"
+    # «ищем опытного специалиста» — обычная формулировка, а не требование кейсов
+    usual = make_project(title="WA Business API",
+                         description="Ищем опытного специалиста: подключить WA Business API.")
+    assert review_reason(usual, TG_SCORE, profile) is None
+
+
+async def test_builtin_names_unconfirmed_tech_and_checks_feasibility_first(
+    profile: Profile, settings: Settings, make_project
+) -> None:
+    p = make_project(title="Подключить Claude к Revit 2023 через MCP",
+                     description="Нужен агент, который управляет Revit 2023 удалённо.")
+    r = score_project(p, settings, p.published_at)
+    text = (await BuiltinDrafter(profile, settings).generate(p, r)).text
+    assert "Опыта с Revit и MCP резюме не подтверждает" in text
+    assert "сначала проверю, какой способ работы с Revit и MCP" in text
+    assert validate_draft(text, profile, []) == []
+
+
+async def test_skills_are_not_presented_as_project_experience(
+    settings: Settings, llm_settings: Settings, make_project
+) -> None:
+    p = make_project(title="API для заказов", description="Сервис на Python, тесты на Pytest.")
+    r = score_project(p, settings, p.published_at)
+    text = (await BuiltinDrafter(HONEST, settings).generate(p, r)).text
+    assert "Из релевантного опыта: делал REST API" in text or "делал REST API" in text
+    assert "В навыках резюме: Pytest и Docker." in text  # ТЗ называет Pytest
+    client = fake_client(reply(GOOD_LLM_TEXT))
+    await LlmDrafter(HONEST, llm_settings, client).generate(p, r)
+    prompt = client.beta.messages.calls[0]["messages"][0]["content"]
+    assert "- делал REST API и интеграции" in prompt
+    assert "Навыки из резюме (инструменты без описанных проектов" in prompt
+    assert "- Pytest и Docker" not in prompt
+
+
+async def test_prompt_has_nearest_examples_and_never_eval_cases(
+    tmp_path: Path, repo_root: Path, llm_settings: Settings, make_project
+) -> None:
+    import json
+
+    folder = tmp_path / "references"
+    folder.mkdir()
+    (tmp_path / "profile.toml").write_text(
+        (repo_root / "profile" / "profile.example.toml").read_text(encoding="utf-8"),
+        encoding="utf-8",
+    )
+
+    def case(i: str, title: str, brief: str, **extra) -> str:
+        given = {"title": title, "brief": brief, "price": "[ЦЕНА]", "deadline": "[СРОК]"}
+        return json.dumps({"id": i, "input": given, **extra}, ensure_ascii=False)
+
+    (folder / "examples.jsonl").write_text("\n".join([
+        case("a", "Импорт CSV", "Загрузка CSV в базу", ideal_response="ОБРАЗЕЦ-CSV"),
+        case("b", "Telegram-бот заявок", "Бот принимает заявки", ideal_response="ОБРАЗЕЦ-БОТ"),
+        case("c", "Отчёт кофейни", "Выручка за неделю", ideal_response="ОБРАЗЕЦ-КОФЕ"),
+    ]), encoding="utf-8")  # fmt: skip
+    (folder / "eval.jsonl").write_text(
+        case("E1", "Telegram-бот заявок", "ПРОВЕРОЧНЫЙ-СЛУЧАЙ", expected_behavior="x"),
+        encoding="utf-8",
+    )
+    own = load_profile(tmp_path / "profile.toml")
+    assert [e.id for e in own.examples] == ["a", "b", "c"]
+    p = make_project(title="Telegram-бот для заявок", description="Бот принимает заявки клиентов")
+    client = fake_client(reply(GOOD_LLM_TEXT))
+    await LlmDrafter(own, llm_settings, client).generate(p, TG_SCORE)
+    prompt = client.beta.messages.calls[0]["messages"][0]["content"]
+    assert prompt.count("<example>") == PROMPT_EXAMPLES == 2
+    assert prompt.index("ОБРАЗЕЦ-БОТ") < prompt.index("<brief>")  # ближайший — в промпте
+    assert "ПРОВЕРОЧНЫЙ-СЛУЧАЙ" not in prompt  # eval.jsonl не читается никогда
+
+
+async def test_llm_draft_longer_than_limit_is_sent_back(
+    profile: Profile, llm_settings: Settings, tg_project: Project
+) -> None:
+    long = GOOD_LLM_TEXT.replace("Мой опыт:", "Мой опыт: " + "подробно " * 120)
+    client = fake_client([reply(long), reply(GOOD_LLM_TEXT)])
+    draft = await LlmDrafter(profile, llm_settings, client).generate(tg_project, TG_SCORE)
+    assert draft.text == GOOD_LLM_TEXT
+    fix = client.beta.messages.calls[1]["messages"][-1]["content"]
+    assert f"сократи до {MAX_DRAFT_CHARS}" in fix
+
+
+def test_review_note_is_shown_as_review_and_kept_out_of_similarity(storage: Storage) -> None:
+    from freelance_bot.telegram_ui import format_draft
+
+    note = review_draft("заказчик требует кейсы (Revit)")
+    assert format_draft(note).startswith("⚠ <b>Нужна ручная оценка</b>")
+    storage.add_response("fl", "1", "draft", note.text, note.generator, False, None)
+    storage.add_response("fl", "2", "draft", "обычный черновик", "builtin", False, None)
+    assert storage.recent_drafts() == ["обычный черновик"]
+
+
+async def test_model_typography_does_not_break_price_check(
+    profile: Profile, llm_settings: Settings, tg_project: Project
+) -> None:
+    """Groq пишет «35 000 ₽» и «Telegram‑бот» с неразрывными символами: цена верная,
+    а посимвольно не совпадала — отклик уходил встроенному генератору."""
+    priced = dataclasses.replace(llm_settings, offer_price_rub=35000, offer_days=11)
+    text = (GOOD_LLM_TEXT.replace("Стоимость: [ЦЕНА], срок: [СРОК].",
+                                  "Стоимость: 35 000 ₽, срок: 11 дней.")
+            .replace("бот записи", "Telegram‑бот записи"))  # fmt: skip
+    draft = await LlmDrafter(profile, priced, fake_client(reply(text))).generate(
+        tg_project, TG_SCORE
+    )
+    assert draft.generator == "llm"
+    assert "35 000 ₽" in draft.text and "Telegram-бот" in draft.text
+
+
+@pytest.mark.parametrize(
+    ("line", "ok"),
+    [
+        ("Стоимость: 35 000 ₽, срок: 11 дней.", True),
+        ("Стоимость: 35 000 рублей, срок: 11 календарных дней.", True),  # правила FL
+        ("Стоимость: 35000 руб., срок: 11 рабочих дней.", True),
+        ("Стоимость: 135 000 ₽, срок: 11 дней.", False),
+        ("Стоимость: 35 000 ₽, срок: 111 дней.", False),
+    ],
+)
+def test_price_and_deadline_from_settings_in_any_spelling(
+    profile: Profile, llm_settings: Settings, line: str, ok: bool
+) -> None:
+    priced = dataclasses.replace(llm_settings, offer_price_rub=35000, offer_days=11)
+    drafter = LlmDrafter(profile, priced, fake_client(reply(GOOD_LLM_TEXT)))
+    assert (drafter._offer_problems(line) == []) is ok

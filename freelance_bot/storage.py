@@ -426,7 +426,8 @@ class Storage:
 
     def recent_drafts(self, limit: int = 20) -> list[str]:
         rows = self._conn.execute(
-            "SELECT text FROM responses ORDER BY id DESC LIMIT ?", (limit,)
+            "SELECT text FROM responses WHERE generator != 'review' ORDER BY id DESC LIMIT ?",
+            (limit,),
         ).fetchall()
         return [r["text"] for r in rows]
 

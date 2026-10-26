@@ -16,7 +16,8 @@ RUN pip install -c deploy/constraints.txt . tzdata==2025.2 \
     && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin bot
 
 COPY settings.toml ./
-COPY profile/profile.toml profile/profile.toml
+# profile.toml и образцы откликов (references/examples.jsonl, если есть) — что пропускает .dockerignore
+COPY profile/ profile/
 COPY deploy/healthcheck.py deploy/healthcheck.py
 
 USER bot

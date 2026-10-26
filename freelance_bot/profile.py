@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 import tomllib
 from dataclasses import dataclass, field
@@ -18,6 +19,9 @@ class Fact:
     text: str
     tags: list[str]
     source: str  # дословная строка резюме (profile/resume_facts.txt)
+    # Строка из раздела «Навыки»: инструмент назван, проектов с ним резюме не описывает —
+    # в отклике «в навыках», а не «делал на …»
+    skill: bool = False
 
 
 @dataclass(frozen=True)
@@ -32,6 +36,20 @@ class Profile:
     experience_years: float = 0.0
     # Делал ли уже Telegram-ботов / AI-агентов: нет — утверждения «делал ботов» запрещены
     built_bots_or_agents: bool = False
+    # Образцы откликов этого человека (references/examples.jsonl рядом с профилем) — для
+    # промпта нейросети; проверочные случаи (eval.jsonl) сюда не загружаются никогда
+    examples: list[Example] = field(default_factory=list)
+
+
+@dataclass(frozen=True)
+class Example:
+    id: str
+    title: str
+    brief: str
+    response: str
+
+
+EXAMPLES_FILE = Path("references/examples.jsonl")
 
 
 def load_profile(path: Path = Path("profile/profile.toml")) -> Profile:
@@ -84,7 +102,29 @@ def load_profile(path: Path = Path("profile/profile.toml")) -> Profile:
         forbidden_claims=forbidden,
         contacts=contacts,
         include_contacts=include,
+        examples=load_examples(path.parent / EXAMPLES_FILE),
     )
+
+
+def load_examples(path: Path) -> list[Example]:
+    """Образцы откликов: строки JSON с `input.title`, `input.brief` и `ideal_response`. Нет
+    файла — образцов нет. Файл с проверочными случаями (без ideal_response) не годится."""
+    if not path.exists():
+        return []
+    examples: list[Example] = []
+    for n, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
+        if not line.strip():
+            continue
+        try:
+            item = json.loads(line)
+            given = item["input"]
+            examples.append(Example(
+                id=str(item["id"]), title=str(given["title"]), brief=str(given["brief"]),
+                response=str(item["ideal_response"]),
+            ))  # fmt: skip
+        except (ValueError, KeyError, TypeError) as exc:
+            raise ProfileError(f"{path}:{n}: образец без input/ideal_response ({exc})") from None
+    return examples
 
 
 def _parse_facts(raw: object) -> list[Fact]:
@@ -105,8 +145,14 @@ def _parse_facts(raw: object) -> list[Fact]:
         tags = item.get("tags", [])
         if not isinstance(tags, list) or not all(isinstance(t, str) for t in tags):
             raise ProfileError(f"{where}.tags: нужен список направлений")
+        skill = item.get("skill", False)
+        if not isinstance(skill, bool):
+            raise ProfileError(f"{where}.skill: true или false")
         facts.append(
-            Fact(id=item["id"], text=item["text"].strip(), tags=list(tags), source=item["source"])
+            Fact(
+                id=item["id"], text=item["text"].strip(), tags=list(tags),
+                source=item["source"], skill=skill,
+            )  # fmt: skip
         )
     return facts
 

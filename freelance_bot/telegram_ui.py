@@ -282,6 +282,8 @@ def format_draft(d: Draft, estimated: bool = False) -> str:
         notes.append("впиши цену вместо [ЦЕНА]")
     if d.deadline_placeholder:
         notes.append("впиши срок вместо [СРОК]")
+    if d.generator == "review":
+        return f"⚠ <b>Нужна ручная оценка</b>\n\n{esc(d.text)}"
     head = "<b>Черновик отклика</b>"
     if notes:
         head += f" ({esc(', '.join(notes))})"
@@ -543,6 +545,8 @@ def format_offer(
     else:
         head = f"✉️ <b>Отклик для {site}:</b>"
     lines = [f"{head} {esc(p.title)}", f'🔗 <a href="{url}">Заказ</a>']
+    if d.generator == "review":  # отклик не написан: что проверить самому
+        return "\n".join([*lines, "", f"⚠ <b>Нужна ручная оценка</b>\n{esc(d.text)}"])
     if leftovers:
         lines += ["", f"⚠ Перед отправкой впишите: {esc(', '.join(leftovers))}"]
     lines += ["", "📋 <b>Текст</b> — нажмите на него, чтобы скопировать:"]

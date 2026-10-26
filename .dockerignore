@@ -5,6 +5,7 @@
 !settings.toml
 !freelance_bot/
 !profile/profile.toml
+!profile/references/examples.jsonl
 !deploy/constraints.txt
 !deploy/healthcheck.py
 **/__pycache__

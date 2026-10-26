@@ -290,7 +290,14 @@ async def test_one_platform_failure_keeps_the_other(settings):
     fetcher = RoutingFetcher([_row(1, "Продавец", "Липецк")], trudvsem_ok=False)
     search = VacancySearch(settings, fetcher_factory=lambda: fetcher, clock=lambda: NOW)
     data = _data("02_sales_assistant", settings, platforms=["superjob", "trudvsem"], location=[])
-    assert [p.platform for p in await search(data)] == ["superjob"]
+    answered = []
+
+    async def on_platform(total):
+        answered.append(total)
+
+    found = await search(data, on_platform=on_platform)
+    assert [p.platform for p in found] == ["superjob"]
+    assert answered == [2, 2]  # прогресс: ответ каждой площадки, и сбойной тоже
     with pytest.raises(RuntimeError):  # сбор одной площадки видит её ошибку
         await search(data, only="trudvsem")
 

@@ -184,7 +184,8 @@ def extract_client_requirements(text: str) -> list[str]:
     lines = (text or "").split("\n")
     for index, line in enumerate(lines):
         for sentence in _sentences(line):
-            if not any(p.search(_norm(sentence)) for p in _CLIENT_PATTERNS):
+            normalized = _norm(sentence)
+            if not any(p.search(normalized) for p in _CLIENT_PATTERNS):
                 continue
             requirement = sentence
             head, colon, tail = sentence.partition(":")

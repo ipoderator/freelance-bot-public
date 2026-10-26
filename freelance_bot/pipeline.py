@@ -435,7 +435,10 @@ class Pipeline:
         items = []
         scoring = self.scoring_settings()
         anketa = self.anketa()
+        marked = self.storage.closed_marks(self.owner_key)  # отметки под прежним списком анкеты
         for p in self.storage.recent_projects(since, OFFER_CLOSED):
+            if (p.platform, p.external_id) in marked:
+                continue
             result = score_project(p, scoring, p.published_at)
             if self._rejected(p, result, scoring, anketa) or self._paid_response_skipped(p):
                 continue

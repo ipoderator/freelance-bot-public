@@ -51,9 +51,10 @@ from freelance_bot.learning import REASONS, nothing_to_learn
 from freelance_bot.matching import VacancySearch, completed_anketa
 from freelance_bot.models import Project, ScoreResult
 from freelance_bot.onboarding import PREFIX as ONBOARDING_PREFIX
-from freelance_bot.onboarding import PUBLIC_HELP, Onboarding
+from freelance_bot.onboarding import PUBLIC_HELP, STAGE_SUMMARY, Onboarding, Reply
 from freelance_bot.pipeline import Keyboard, Offer, Pipeline
 from freelance_bot.pricing import estimate
+from freelance_bot.progress import Progress, Tracker
 from freelance_bot.schedule import Schedule, describe, next_send_at
 from freelance_bot.storage import Storage
 from freelance_bot.telegram_ui import (
@@ -144,6 +145,9 @@ STATS_RESET_FLAG = "stats_reset_at"  # с какого момента счита
 DIGEST_LAST_FLAG = "digest_last_at"  # когда прислан последний список новых (UTC ISO)
 DIGEST_TICK_SEC = 60  # как часто проверять, не пора ли список: расписание анкеты меняется
 DIGEST_LIMIT = 15  # карточек в одном списке новых: остальные — в следующем
+PROGRESS_ALL = "Собираю подходящие предложения…"
+PROGRESS_NEW = "Собираю новые предложения…"
+STAGE_PICK = "Отбираю и сортирую"
 CARD_ACTIONS = ("applied", "skip", "redraft", "offer", "cancel", "pick", "nofit", "letter")
 LETTER_FLAG = "letter:{platform}:{external_id}"  # {"n": вариант, "text": последнее письмо}
 NOFIT_TITLE_MAX = 60
@@ -315,9 +319,12 @@ class BotHandlers:
         self.storage = storage
         self.pipeline = pipeline
         summarize = pipeline.summarizer.summarize_many if pipeline is not None else None
+        self.tracker = Tracker()  # подборки списков: прогресс и защита от повторных нажатий
         self.onboarding = Onboarding(
-            settings, storage, summarize=summarize, search=VacancySearch(settings)
-        )
+            settings, storage, summarize=summarize, search=VacancySearch(settings),
+            owner_list=self.owner_matches if pipeline is not None else None,
+            tracker=self.tracker,
+        )  # fmt: skip
         self.letters = CoverLetterWriter(settings)
 
     def _is_owner(self, update: Update) -> bool:
@@ -541,20 +548,48 @@ class BotHandlers:
     async def last(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         if not self._is_owner(update):
             return await self._deny(update)
-        candidates = self.pipeline.offer_candidates(LAST_LIMIT)
-        async with _typing(update.effective_message):
-            pages = await self._pages(candidates)
+        if busy := self.tracker.busy_text(update.effective_user.id):
+            return await self._reply(update, busy)
+        async with self.tracker.run(
+            update.effective_user.id, PROGRESS_ALL, update.effective_message.reply_text
+        ) as progress:
+            await self.owner_matches(self._replier(update), "", LAST_LIMIT, progress)
+
+    async def owner_matches(
+        self, reply: Reply, later: str, limit: int, progress: Progress
+    ) -> None:
+        """«Все предложения» владельца; то же — его «Предложения по анкете» (с припиской
+        `later` о следующих): один отбор и одни кнопки, а не два разных списка."""
+        await progress.update(10, STAGE_PICK)
+        candidates = self.pipeline.offer_candidates(limit)
+        pages = await self._pages(candidates, progress=progress)
         if not pages:
-            return await self._reply(update, format_offer_list([], self.settings.timezone))
+            empty = format_offer_list([], self.settings.timezone)
+            return await reply(f"{empty}\n\n{later}" if later else empty, None)
+        if later:
+            text, keyboard = pages[-1]
+            pages[-1] = (f"{text}\n\n{later}", keyboard)
         for text, keyboard in pages:
-            await self._reply(update, text, _markup(keyboard))
+            await reply(text, _markup(keyboard))
+
+    def _replier(self, update: Update) -> Reply:
+        async def reply(text: str, markup: InlineKeyboardMarkup | None) -> None:
+            await self._reply(update, text, markup)
+
+        return reply
 
     async def new(self, update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         """Новые заказы сейчас, не дожидаясь дайджеста."""
         if not self._is_owner(update):
             return await self._deny(update)
-        async with _typing(update.effective_message):
-            sent = await self.send_digest(lambda text, kb: self._reply(update, text, _markup(kb)))
+        if busy := self.tracker.busy_text(update.effective_user.id):
+            return await self._reply(update, busy)
+        async with self.tracker.run(
+            update.effective_user.id, PROGRESS_NEW, update.effective_message.reply_text
+        ) as progress:
+            sent = await self.send_digest(
+                lambda text, kb: self._reply(update, text, _markup(kb)), progress
+            )
         if not sent:
             await self._reply(
                 update,
@@ -562,17 +597,19 @@ class BotHandlers:
                 f"{MENU_ALL}.",
             )
 
-    async def send_digest(self, send: Any) -> int:
+    async def send_digest(self, send: Any, progress: Progress | None = None) -> int:
         """Новые (queued) заказы списком через `send(text, keyboard)` — не больше DIGEST_LIMIT,
         остальные ждут следующего списка; доставленные больше не новые. Возвращает, сколько
         прислано."""
+        if progress is not None:
+            await progress.update(10, STAGE_PICK)
         queued = self.pipeline.digest_items()
         if not queued:
             return 0
         candidates = queued[:DIGEST_LIMIT]
         rest = len(queued) - len(candidates)
         title = DIGEST_TITLE.format(count=len(candidates))
-        pages = await self._pages(candidates, title)
+        pages = await self._pages(candidates, title, progress)
         if rest:
             text, keyboard = pages[-1]
             pages[-1] = (f"{text}\n\n{DIGEST_MORE.format(rest=rest, all=MENU_ALL)}", keyboard)
@@ -582,12 +619,19 @@ class BotHandlers:
         return len(candidates)
 
     async def _pages(
-        self, candidates: list[tuple[Project, ScoreResult]], title: str | None = None
+        self,
+        candidates: list[tuple[Project, ScoreResult]],
+        title: str | None = None,
+        progress: Progress | None = None,
     ) -> list[tuple[str, Keyboard]]:
         """Сообщения списка; номера запоминаются, чтобы выбрать заказ цифрой в чат."""
         items = [(p, r.score) for p, r in candidates]
         guesses = [estimate(p, r, self.settings) for p, r in candidates]
-        summaries = await self.pipeline.summarizer.summarize_many([p for p, _ in items])
+        step = None
+        if progress is not None:
+            await progress.update(30, STAGE_SUMMARY)
+            step = progress.steps(30, 95, len(items))
+        summaries = await self.pipeline.summarizer.summarize_many([p for p, _ in items], step)
         shown = ",".join(f"{p.platform}:{p.external_id}" for p, _ in items)
         self.storage.set_flag(LAST_LIST_FLAG, shown)
         now = datetime.now(UTC)

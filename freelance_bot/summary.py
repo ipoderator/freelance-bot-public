@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
-from collections.abc import Sequence
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Any, Protocol
 
 from freelance_bot.config import Settings
@@ -153,8 +153,18 @@ class CachedSummarizer:
             self.storage.set_flag(key, text)
         return text
 
-    async def summarize_many(self, projects: Sequence[Project]) -> list[str]:
-        return list(await asyncio.gather(*(self.summarize(p) for p in projects)))
+    async def summarize_many(
+        self, projects: Sequence[Project], on_done: Callable[[], Awaitable[None]] | None = None
+    ) -> list[str]:
+        """Суть всех сразу; `on_done` — после каждой готовой (прогресс подборки)."""
+
+        async def one(p: Project) -> str:
+            text = await self.summarize(p)
+            if on_done is not None:
+                await on_done()
+            return text
+
+        return list(await asyncio.gather(*(one(p) for p in projects)))
 
 
 def make_summarizer(settings: Settings, storage: Any) -> CachedSummarizer:

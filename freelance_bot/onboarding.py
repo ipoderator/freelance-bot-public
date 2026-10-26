@@ -46,6 +46,7 @@ from freelance_bot.matching import (
     user_settings,
 )
 from freelance_bot.models import Project, ScoreResult, User
+from freelance_bot.progress import Progress, Tracker
 from freelance_bot.resume import (
     FORMATS_HINT,
     MAX_FILE_BYTES,
@@ -192,6 +193,10 @@ MATCHES_LATER = (
     "— кнопка «{button}» в /start."
 )
 MATCHES_LATER_OWNER = "Новые пришлю сам {when} ({tz}) — списком «Новые предложения»."
+MATCHES_PROGRESS = "Подбираю предложения по анкете…"
+STAGE_SEARCH = "Ищу вакансии на площадках анкеты"
+STAGE_SELECT = "Отбираю то, что подходит резюме"
+STAGE_SUMMARY = "Готовлю краткое описание"
 APPLIED_TEXT = "✅ Записал: вы откликнулись на «{title}». В списке она больше не появится."
 APPLIED_LEARNED = "\n🧠 Похожие ({words}) теперь будут выше — /learned."
 GONE_TEXT = "Этой вакансии уже нет в вашем списке — откройте его заново: /start."
@@ -218,8 +223,11 @@ PUBLIC_HELP = (
 BUTTON_HELP = "❓ Как пользоваться"
 
 Reply = Callable[[str, InlineKeyboardMarkup | None], Awaitable[Any]]
-Summarize = Callable[[Sequence[Project]], Awaitable[list[str]]]
-Search = Callable[[dict[str, Any]], Awaitable[list[Project]]]
+Summarize = Callable[..., Awaitable[list[str]]]  # (projects, on_done=шаг прогресса)
+Search = Callable[..., Awaitable[list[Project]]]  # (data, statuses=…, on_platform=…)
+# Список владельца — тот же, что «Все предложения» (BotHandlers.owner_matches):
+# (reply, приписка, сколько, прогресс)
+OwnerList = Callable[[Reply, str, int, Progress], Awaitable[None]]
 
 
 def consent_text(settings: Settings) -> str:
@@ -577,6 +585,8 @@ class Onboarding:
         spawn: Callable[[Coroutine[Any, Any, Any]], Any] | None = None,
         summarize: Summarize | None = None,
         search: Search | None = None,
+        owner_list: OwnerList | None = None,
+        tracker: Tracker | None = None,
     ) -> None:
         self.settings = settings
         self.storage = storage
@@ -584,6 +594,8 @@ class Onboarding:
         self.spawn = spawn
         self.summarize = summarize  # суть заказа (📝) с кэшем; нет — список без неё
         self.search = search  # живой поиск вакансий под анкету (matching.VacancySearch)
+        self.owner_list = owner_list  # без него (тесты без Pipeline) владельцу — как всем
+        self.tracker = tracker or Tracker()  # идущие подборки: повторное нажатие ждёт
 
     def in_progress(self, tg_id: int) -> bool:
         """Анкета начата и не закончена — сообщения пользователя идут в неё."""
@@ -746,6 +758,8 @@ class Onboarding:
         user = self.storage.get_user(tg_id)
         if action in FEEDBACK_ACTIONS and user is not None:
             return await self._feedback(user, action, value, query, reply)  # отвечает сам
+        if action == "matches" and (busy := self.tracker.busy_text(tg_id)):
+            return await query.answer(busy)  # подборка уже идёт — вторую не запускать
         await query.answer()
         if action == "forget_yes":
             await _clear(query)
@@ -1034,7 +1048,18 @@ class Onboarding:
     async def _send_matches(
         self, user: User, reply: Reply, limit: int = FIRST_MATCHES_LIMIT
     ) -> None:
-        """Заказы под анкету. Сбой здесь не должен портить сохранённую анкету."""
+        """Заказы под анкету, пока идёт подборка — прогресс. Сбой здесь не должен портить
+        сохранённую анкету."""
+
+        async def send(text: str) -> Any:
+            return await reply(text, None)
+
+        async with self.tracker.run(user.tg_id, MATCHES_PROGRESS, send) as progress:
+            await self._matches_list(user, reply, limit, progress)
+
+    async def _matches_list(
+        self, user: User, reply: Reply, limit: int, progress: Progress
+    ) -> None:
         tz = self.settings.timezone
         owner = user.tg_id == self.settings.owner_id
         when = describe(Schedule.from_dict(user.data["schedule"]))
@@ -1043,13 +1068,30 @@ class Onboarding:
             if owner and self.settings.digest_enabled  # дайджест владельца — по его анкете
             else MATCHES_LATER.format(when=when, tz=tz_label(tz), button=BUTTON_MATCHES)
         )
+        if owner and self.owner_list is not None:
+            # тот же список и те же кнопки, что «Все предложения»: собранное под его анкету
+            # уже в базе — живой поиск не нужен (2026-10-26)
+            try:
+                return await self.owner_list(reply, later, limit, progress)
+            except Exception as exc:
+                log.error("список владельца не собран: %s", type(exc).__name__)
+                return
         live: list[Project] = []
         statuses: dict[str, str] = {}
         if self.search is not None:
+            await progress.update(5, STAGE_SEARCH)
+            answered = 0
+
+            async def on_platform(total: int) -> None:
+                nonlocal answered
+                answered += 1
+                await progress.update(5 + 55 * answered / total)
+
             try:
-                live = await self.search(user.data, statuses=statuses)
+                live = await self.search(user.data, statuses=statuses, on_platform=on_platform)
             except Exception as exc:  # SuperJob недоступен — остаются собранные
                 log.warning("вакансии под анкету не найдены: %s", type(exc).__name__)
+        await progress.update(60, STAGE_SELECT)
         try:
             items = first_matches(
                 user.data, self.settings, self.storage, datetime.now(UTC), limit,
@@ -1059,7 +1101,12 @@ class Onboarding:
             if not items:
                 return await reply(f"{self._none_text(user, statuses)}\n\n{later}", None)
             projects = [p for p, _ in items]
-            summaries = await self.summarize(projects) if self.summarize else None
+            await progress.update(70, STAGE_SUMMARY)
+            summaries = (
+                await self.summarize(projects, on_done=progress.steps(70, 95, len(projects)))
+                if self.summarize
+                else None
+            )
             pages = matches_pages(items, summaries, tz, reserve=len(later) + 2)
             self.storage.mark_shown(user.tg_id, projects)  # для кнопок отметок
         except Exception as exc:

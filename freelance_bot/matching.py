@@ -21,7 +21,7 @@ import asyncio
 import logging
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from typing import Any
@@ -371,9 +371,11 @@ class VacancySearch:
     async def __call__(
         self, data: dict[str, Any], only: Platform | None = None,
         statuses: dict[str, str] | None = None,
+        on_platform: Callable[[int], Awaitable[None]] | None = None,
     ) -> list[Project]:  # fmt: skip
         """`statuses` — заполняется ответом каждой площадки анкеты: «найдено N», «не
-        ответила», «выключена» — чтобы пустой список объяснял, что искалось."""
+        ответила», «выключена» — чтобы пустой список объяснял, что искалось. `on_platform`
+        узнаёт, сколько площадок будет, и зовётся после ответа каждой (прогресс подборки)."""
         statuses = {} if statuses is None else statuses
         profile = resume_profile(data)
         if profile is None:
@@ -387,9 +389,16 @@ class VacancySearch:
         if not platforms or not queries:
             return []
         chosen = location_choice(data)
+
+        async def one(platform: Platform) -> list[Project]:
+            try:
+                return await self._search(platform, profile, queries, chosen)
+            finally:
+                if on_platform is not None:
+                    await on_platform(len(platforms))
+
         answers = await asyncio.gather(  # площадки — параллельно: ждать самую медленную
-            *(self._search(p, profile, queries, chosen) for p in platforms),
-            return_exceptions=True,
+            *(one(p) for p in platforms), return_exceptions=True
         )
         found: dict[tuple[str, str], Project] = {}
         for platform, projects in zip(platforms, answers, strict=True):

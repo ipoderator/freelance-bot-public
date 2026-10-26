@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import plistlib
 import subprocess
 from datetime import UTC, datetime, timedelta
@@ -29,6 +30,7 @@ from freelance_bot.bot import (
 from freelance_bot.config import load_settings
 from freelance_bot.models import Draft
 from freelance_bot.pipeline import Pipeline
+from freelance_bot.progress import BUSY_TEXT
 from freelance_bot.storage import Storage
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -1170,3 +1172,69 @@ async def test_owner_lessons_belong_to_his_resume(env, make_project):
     update, message, _ = update_from(OWNER, text="/learned")
     await env.handlers.learned(update, None)
     assert "Для резюме «Повар»" in message.replies[0] and "кафе" in message.replies[0]
+
+
+# ── 2026-10-26: один список владельца, прогресс, повторные нажатия ───────────────────
+
+
+async def test_owner_matches_button_gives_same_list_as_all_offers(env, make_project):
+    """«🔎 Предложения по анкете» владельца — тот же отбор и те же кнопки, что «📋 Все
+    предложения», а не отдельный список с одними «✅»/«👎» и другим составом."""
+    _owner_anketa(env.storage, {"every_min": 60, "start_hour": 9, "end_hour": 21})
+    for i in range(3):
+        env.storage.upsert_project(make_project(
+            external_id=f"8{i}", url=f"https://www.fl.ru/projects/8{i}/",
+            title=f"Бэкенд на Python и FastAPI №{i}", extra={"for_all": True},
+        ))  # fmt: skip
+    update, all_offers, _ = update_from(OWNER)
+    await env.handlers.last(update, None)
+    update, by_anketa, query = update_from(OWNER, "ob:matches")
+    await env.handlers.button(update, None)
+
+    def picks(message):
+        return [b.callback_data for kb in message.markups for row in kb.inline_keyboard
+                for b in row]  # fmt: skip
+
+    assert picks(all_offers) and picks(by_anketa) == picks(all_offers)
+    assert all(data.startswith("pick:") for data in picks(by_anketa))  # карточка по нажатию
+    assert by_anketa.replies[0].startswith(all_offers.replies[0])
+    assert "раз в час, 9:00–21:00" in by_anketa.replies[-1]  # когда придут следующие
+
+    # отметка под прежним списком анкеты убирает заказ и из «Все предложения»
+    env.storage.mark_shown(OWNER, [env.storage.get_project("fl", "80")])
+    assert env.storage.set_mark(OWNER, "fl", "80", "applied")
+    update, again, _ = update_from(OWNER)
+    await env.handlers.last(update, None)
+    assert "pick:fl:80" not in picks(again) and "pick:fl:81" in picks(again)
+
+
+async def test_second_tap_while_list_is_built_does_not_start_another(env):
+    """Пока идёт подборка, повторное нажатие получает «уже ищу», а не вторую подборку."""
+    _owner_anketa(env.storage, {"every_min": 60, "start_hour": 9, "end_hour": 21})
+    gate, calls = asyncio.Event(), []
+    summarizer = env.handlers.pipeline.summarizer
+
+    async def slow(projects, on_done=None):
+        calls.append(len(projects))
+        await gate.wait()
+        return ["суть"] * len(projects)
+
+    summarizer.summarize_many = slow
+    update, first, _ = update_from(OWNER)
+    task = asyncio.create_task(env.handlers.last(update, None))
+    while not calls:
+        await asyncio.sleep(0)
+
+    update, menu, _ = update_from(OWNER)
+    await env.handlers.last(update, None)
+    assert menu.replies == [BUSY_TEXT.format(percent=30)]
+    update, _, query = update_from(OWNER, "ob:matches")
+    await env.handlers.button(update, None)
+    assert query.answers == [BUSY_TEXT.format(percent=30)]
+
+    gate.set()
+    await task
+    assert len(calls) == 1 and "Подходящие предложения" in first.replies[-1]
+    update, menu, _ = update_from(OWNER)
+    await env.handlers.last(update, None)  # подборка закончилась — снова можно
+    assert "Подходящие предложения" in menu.replies[-1]
